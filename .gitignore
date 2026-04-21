@@ -1,0 +1,17 @@
+# Ignore everything by default
+*
+
+# Keep folders explorable
+!*/
+
+# Keep Python source
+!*.py
+
+# Keep markdown docs
+!*.md
+
+# Keep env file
+!environment-edgeids.yml
+
+# Keep gitignore itself
+!.gitignore
