@@ -7,8 +7,15 @@
 # Keep Python source
 !*.py
 
+# Keep notebooks
+!*.ipynb
+
 # Keep markdown docs
 !*.md
+
+# Keep root install files
+!requirements.txt
+!environment.yml
 
 # Keep env file
 !environment-edgeids.yml

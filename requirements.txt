@@ -1,0 +1,12 @@
+pandas
+numpy
+joblib
+scikit-learn
+xgboost
+shap
+matplotlib
+imbalanced-learn
+streamlit
+plotly
+streamlit-autorefresh
+pymongo
