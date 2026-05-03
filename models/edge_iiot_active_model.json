@@ -1,0 +1,12 @@
+{
+  "kind": "active_model_pointer",
+  "version": "20260503T213545Z",
+  "updated_at": "2026-05-03T21:35:45.968793+00:00",
+  "binary_model_path": "C:\\Users\\abdul\\Desktop\\BigDataFinalPaper\\models\\edge_iiot_xgb_model_retrained.joblib",
+  "attack_model_path": "models\\edge_iiot_attack_xgb_model.joblib",
+  "feature_contract_path": "C:\\Users\\abdul\\Desktop\\BigDataFinalPaper\\models\\edge_iiot_feature_contract.json",
+  "threshold_path": "C:\\Users\\abdul\\Desktop\\BigDataFinalPaper\\models\\edge_iiot_xgb_model_retrained.metadata.json",
+  "multiclass_threshold_path": "output\\reports\\edge_iiot_multiclass_thresholds.json",
+  "updated_by": "adaptive_retrain",
+  "retraining_assessment": "little_difference"
+}

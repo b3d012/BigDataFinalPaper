@@ -8,7 +8,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-from sklearn.metrics import accuracy_score, average_precision_score, confusion_matrix, roc_auc_score
+from sklearn.metrics import average_precision_score, confusion_matrix, roc_auc_score
 
 from edge_iiot_experiment import DEFAULT_REPORT_DIR
 from edge_iiot_multiclass import calibrate_multiclass_thresholds
@@ -64,16 +64,18 @@ def compute_threshold_metrics(y_true: np.ndarray, y_score: np.ndarray, threshold
         tn, fp, fn, tp = confusion_matrix(y_true, pred, labels=[0, 1]).ravel()
         precision = float(tp / (tp + fp)) if tp + fp else 0.0
         recall = float(tp / (tp + fn)) if tp + fn else 0.0
+        normal_recall = float(tn / (tn + fp)) if tn + fp else 0.0
+        macro_recall = float((normal_recall + recall) / 2.0)
         fnr = float(fn / (fn + tp)) if fn + tp else 0.0
-        accuracy = float(accuracy_score(y_true, pred))
         f1 = float((2 * precision * recall) / (precision + recall + 1e-12))
         f2 = float((5 * precision * recall) / (4 * precision + recall + 1e-12))
         rows.append(
             {
                 "threshold": float(threshold),
-                "accuracy": accuracy,
                 "attack_precision": precision,
                 "attack_recall": recall,
+                "normal_recall": normal_recall,
+                "macro_recall": macro_recall,
                 "attack_fnr": fnr,
                 "attack_f1": f1,
                 "attack_f2": f2,
@@ -91,9 +93,10 @@ def compute_threshold_metrics(y_true: np.ndarray, y_score: np.ndarray, threshold
 def row_to_metrics(row: pd.Series) -> dict[str, float]:
     return {
         "threshold": float(row["threshold"]),
-        "accuracy": float(row["accuracy"]),
         "attack_precision": float(row["attack_precision"]),
         "attack_recall": float(row["attack_recall"]),
+        "normal_recall": float(row["normal_recall"]),
+        "macro_recall": float(row["macro_recall"]),
         "attack_fnr": float(row["attack_fnr"]),
         "attack_f1": float(row["attack_f1"]),
         "attack_f2": float(row["attack_f2"]),
@@ -131,8 +134,9 @@ def select_recommendations(grid: pd.DataFrame, *, min_precision: float, default_
         metrics["delta_from_default"] = {
             "attack_precision": float(row["attack_precision"] - default_row["attack_precision"]),
             "attack_recall": float(row["attack_recall"] - default_row["attack_recall"]),
+            "normal_recall": float(row["normal_recall"] - default_row["normal_recall"]),
+            "macro_recall": float(row["macro_recall"] - default_row["macro_recall"]),
             "attack_fnr": float(row["attack_fnr"] - default_row["attack_fnr"]),
-            "accuracy": float(row["accuracy"] - default_row["accuracy"]),
             "attack_f1": float(row["attack_f1"] - default_row["attack_f1"]),
             "attack_f2": float(row["attack_f2"] - default_row["attack_f2"]),
         }

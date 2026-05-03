@@ -20,6 +20,7 @@ from edge_iiot_experiment import (
     coerce_feature_types,
     normalize_columns,
 )
+from edge_iiot_runtime import attach_model_feature_names, validate_runtime_contract
 
 
 DEFAULT_CLASSIFIER_BUNDLE = Path("models/edge_iiot_xgb_model.joblib")
@@ -47,6 +48,7 @@ def load_bundle(model_path: Path) -> dict[str, object]:
     missing = required - set(bundle.keys())
     if missing:
         raise ValueError(f"Classifier bundle is missing required keys: {sorted(missing)}")
+    attach_model_feature_names(bundle)
     return bundle
 
 
@@ -230,6 +232,13 @@ def prepare_demo_predictions(
     training_meta = bundle["training_meta"]
     model_input = prepare_model_input(df, training_meta)
     transformed = bundle["preprocessor"].transform(model_input)
+    validate_runtime_contract(
+        bundle=bundle,
+        model_input=model_input,
+        transformed=transformed,
+        transformed_feature_names=get_transformed_feature_names(bundle["preprocessor"]),
+        stage="anomaly_demo_score",
+    )
     scores = make_anomaly_scores(bundle["model"], transformed, dense_used=dense_used)
     pred_label = (scores >= threshold).astype(int)
 
@@ -303,6 +312,10 @@ def fit_anomaly_bundle(
     holdout_comparison = build_holdout_comparison(holdout_predictions, classifier_holdout_predictions)
 
     transformed_feature_names = get_transformed_feature_names(preprocessor)
+    try:
+        anomaly_model.feature_names_ = list(transformed_feature_names)
+    except Exception:
+        pass
     runtime = {
         "rows_total": int(len(X)),
         "features_total": int(X.shape[1]),
@@ -444,11 +457,12 @@ def write_run_summary(
         f"- Dense fallback used: {bundle['runtime']['dense_fallback_used']}",
         "",
         "## Holdout Metrics",
-        f"- Accuracy: {metrics['accuracy']:.4f}",
         f"- ROC-AUC: {metrics['roc_auc']:.4f}",
         f"- PR-AUC: {metrics['pr_auc']:.4f}",
         f"- Attack precision: {metrics['precision']:.4f}",
         f"- Attack recall: {metrics['recall']:.4f}",
+        f"- Normal recall: {metrics['normal_recall']:.4f}",
+        f"- Macro recall: {metrics['macro_recall']:.4f}",
         f"- Attack FNR: {metrics['fnr']:.4f}",
         "",
         "## Score Summary",
@@ -593,11 +607,12 @@ def train_command(args: argparse.Namespace) -> None:
     )
     print(f"Saved run summary: {run_summary_path}")
     print("\nHoldout anomaly metrics:")
-    print(f"Accuracy   : {bundle['evaluation_metrics']['accuracy']:.4f}")
     print(f"ROC-AUC    : {bundle['evaluation_metrics']['roc_auc']:.4f}")
     print(f"PR-AUC     : {bundle['evaluation_metrics']['pr_auc']:.4f}")
     print(f"Precision  : {bundle['evaluation_metrics']['precision']:.4f}")
     print(f"Recall     : {bundle['evaluation_metrics']['recall']:.4f}")
+    print(f"Normal R   : {bundle['evaluation_metrics']['normal_recall']:.4f}")
+    print(f"Macro R    : {bundle['evaluation_metrics']['macro_recall']:.4f}")
     print(f"FNR        : {bundle['evaluation_metrics']['fnr']:.4f}")
     print("Confusion matrix [ [TN, FP], [FN, TP] ]")
     print(

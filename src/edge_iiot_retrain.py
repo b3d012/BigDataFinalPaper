@@ -14,13 +14,21 @@ from edge_iiot_drift import compare_batches, json_safe
 from edge_iiot_experiment import (
     DEFAULT_EDGE_CSV,
     evaluation_from_predictions,
+    get_transformed_feature_names,
     make_preprocessor,
     prepare_training_frame,
     coerce_feature_types,
     train_xgb_with_balance,
 )
 from edge_iiot_mongo import PREDICTIONS_COLLECTION, RETRAIN_EVENTS_COLLECTION, collection_to_dataframe, connect_database, insert_documents
-from edge_iiot_runtime import DEFAULT_ACTIVE_MODEL_POINTER_PATH, load_active_model_pointer, resolve_model_path, save_active_model_pointer
+from edge_iiot_runtime import (
+    DEFAULT_ACTIVE_MODEL_POINTER_PATH,
+    attach_model_feature_names,
+    load_active_model_pointer,
+    resolve_model_path,
+    save_active_model_pointer,
+    validate_runtime_contract,
+)
 
 
 DEFAULT_CLASSIFIER_BUNDLE = Path("models/edge_iiot_xgb_model.joblib")
@@ -39,6 +47,9 @@ DEFAULT_EVAL_FRACTION = 0.20
 DEFAULT_HIGH_THRESHOLD = 0.25
 DEFAULT_MODERATE_THRESHOLD = 0.10
 DEFAULT_MODERATE_FEATURE_COUNT = 12
+DEFAULT_MIN_RETRAIN_PR_AUC = 0.92
+DEFAULT_MIN_RETRAIN_ATTACK_RECALL = 0.90
+DEFAULT_MIN_RETRAIN_NORMAL_RECALL = 0.50
 
 
 def load_bundle(model_path: Path) -> dict[str, object]:
@@ -54,6 +65,7 @@ def load_bundle(model_path: Path) -> dict[str, object]:
     missing = required - set(bundle.keys())
     if missing:
         raise ValueError(f"Classifier bundle is missing required keys: {sorted(missing)}")
+    attach_model_feature_names(bundle)
     return bundle
 
 
@@ -162,7 +174,16 @@ def prepare_feature_frame(
 
 
 def evaluate_bundle(bundle: dict[str, object], X_eval: pd.DataFrame, y_eval: pd.Series, *, threshold: float) -> dict[str, object]:
-    proba = bundle["model"].predict_proba(bundle["preprocessor"].transform(X_eval))[:, 1]
+    transformed = bundle["preprocessor"].transform(X_eval)
+    feature_names = get_transformed_feature_names(bundle["preprocessor"])
+    validate_runtime_contract(
+        bundle=bundle,
+        model_input=X_eval,
+        transformed=transformed,
+        transformed_feature_names=feature_names,
+        stage="retrain_evaluate_bundle",
+    )
+    proba = bundle["model"].predict_proba(transformed)[:, 1]
     evaluation = evaluation_from_predictions(y_eval, proba, threshold=threshold)
     metrics = evaluation["metrics"]
     return {
@@ -189,13 +210,6 @@ def describe_trigger(summary: dict[str, object]) -> tuple[bool, str]:
 
 def compare_metrics(original: dict[str, float], retrained: dict[str, float]) -> pd.DataFrame:
     rows = [
-        {
-            "metric": "accuracy",
-            "original": float(original["accuracy"]),
-            "retrained": float(retrained["accuracy"]),
-            "delta": float(retrained["accuracy"] - original["accuracy"]),
-            "direction": "higher_is_better",
-        },
         {
             "metric": "roc_auc",
             "original": float(original["roc_auc"]),
@@ -225,6 +239,20 @@ def compare_metrics(original: dict[str, float], retrained: dict[str, float]) -> 
             "direction": "higher_is_better",
         },
         {
+            "metric": "normal_recall",
+            "original": float(original["normal_recall"]),
+            "retrained": float(retrained["normal_recall"]),
+            "delta": float(retrained["normal_recall"] - original["normal_recall"]),
+            "direction": "higher_is_better",
+        },
+        {
+            "metric": "macro_recall",
+            "original": float(original["macro_recall"]),
+            "retrained": float(retrained["macro_recall"]),
+            "delta": float(retrained["macro_recall"] - original["macro_recall"]),
+            "direction": "higher_is_better",
+        },
+        {
             "metric": "attack_fnr",
             "original": float(original["fnr"]),
             "retrained": float(retrained["fnr"]),
@@ -235,20 +263,43 @@ def compare_metrics(original: dict[str, float], retrained: dict[str, float]) -> 
     return pd.DataFrame(rows)
 
 
-def assess_change(comparison: pd.DataFrame) -> str:
+def candidate_passes_retrain_gate(
+    retrained: dict[str, float],
+    *,
+    min_pr_auc: float = DEFAULT_MIN_RETRAIN_PR_AUC,
+    min_attack_recall: float = DEFAULT_MIN_RETRAIN_ATTACK_RECALL,
+    min_normal_recall: float = DEFAULT_MIN_RETRAIN_NORMAL_RECALL,
+) -> tuple[bool, list[str]]:
+    failures = []
+    if float(retrained["pr_auc"]) < min_pr_auc:
+        failures.append(f"pr_auc<{min_pr_auc:.2f}")
+    if float(retrained["recall"]) < min_attack_recall:
+        failures.append(f"attack_recall<{min_attack_recall:.2f}")
+    if float(retrained["normal_recall"]) < min_normal_recall:
+        failures.append(f"normal_recall<{min_normal_recall:.2f}")
+    return not failures, failures
+
+
+def assess_change(comparison: pd.DataFrame, retrained: dict[str, float] | None = None) -> str:
+    if retrained is not None:
+        gate_passed, _ = candidate_passes_retrain_gate(retrained)
+        if not gate_passed:
+            return "rejected_gate"
     pr_delta = float(comparison.loc[comparison["metric"] == "pr_auc", "delta"].iloc[0])
     recall_delta = float(comparison.loc[comparison["metric"] == "attack_recall", "delta"].iloc[0])
     fnr_delta = float(comparison.loc[comparison["metric"] == "attack_fnr", "delta"].iloc[0])
+    normal_recall_delta = float(comparison.loc[comparison["metric"] == "normal_recall", "delta"].iloc[0])
 
-    if recall_delta > 0.005 and fnr_delta < -0.005 and pr_delta >= -0.001:
+    if recall_delta > 0.005 and fnr_delta < -0.005 and pr_delta >= -0.001 and normal_recall_delta >= -0.02:
         return "helped"
-    if recall_delta < -0.005 or fnr_delta > 0.005 or pr_delta < -0.001:
+    if recall_delta < -0.005 or fnr_delta > 0.005 or pr_delta < -0.001 or normal_recall_delta < -0.02:
         return "hurt"
     return "little_difference"
 
 
 def save_retrained_bundle(bundle: dict[str, object], model_path: Path, *, pointer_path: Path | None = None) -> None:
     model_path.parent.mkdir(parents=True, exist_ok=True)
+    attach_model_feature_names(bundle)
     joblib.dump(bundle, model_path)
 
     meta_path = model_path.with_suffix(".metadata.json")
@@ -278,7 +329,7 @@ def save_retrained_bundle(bundle: dict[str, object], model_path: Path, *, pointe
             feature_contract_path=pointer.get("feature_contract_path"),
             threshold_path=meta_path,
             multiclass_threshold_path=pointer.get("multiclass_threshold_path"),
-            version=str(bundle.get("model_version") or bundle.get("retraining_meta", {}).get("model_version") or None),
+            version=str(bundle.get("model_version") or bundle.get("retraining_meta", {}).get("model_version") or "retrained"),
             extra={
                 "kind": "active_model_pointer",
                 "updated_by": "adaptive_retrain",
@@ -418,19 +469,26 @@ def train_command(args: argparse.Namespace) -> None:
             )
             X_train_tx = preprocessor.fit_transform(training_X)
             retrained_model = train_xgb_with_balance(X_train_tx, training_y, balanced_training=False)
+            try:
+                retrained_model.feature_names_ = get_transformed_feature_names(preprocessor)
+            except Exception:
+                pass
             retrained_eval = evaluate_bundle(
                 {
                     "model": retrained_model,
                     "preprocessor": preprocessor,
+                    "training_meta": training_meta,
                 },
                 X_eval,
                 y_eval,
                 threshold=threshold,
             )
             retrained_metrics = retrained_eval["metrics"]
+            model_version = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
             retrained_bundle = {
                 "model": retrained_model,
                 "preprocessor": preprocessor,
+                "model_version": model_version,
                 "threshold": threshold,
                 "threshold_strategy": original_bundle.get("threshold_strategy", "fixed"),
                 "fixed_threshold": threshold,
@@ -450,6 +508,7 @@ def train_command(args: argparse.Namespace) -> None:
                     "drift_rows": int(len(X_drift)),
                     "evaluation_rows": int(len(X_eval)),
                     "source": split_label,
+                    "model_version": model_version,
                 },
                 "evaluation_metrics": retrained_metrics,
                 "evaluation_report": retrained_eval["classification_report"],
@@ -461,10 +520,13 @@ def train_command(args: argparse.Namespace) -> None:
             save_retrained_bundle(retrained_bundle, retrained_bundle_path)
 
         comparison = compare_metrics(original_metrics, retrained_metrics if retrained_metrics is not None else original_metrics)
-        assessment = assess_change(comparison) if triggered and retrained_metrics is not None else "not_retrained"
+        gate_passed, gate_failures = (
+            candidate_passes_retrain_gate(retrained_metrics) if retrained_metrics is not None else (False, ["not_retrained"])
+        )
+        assessment = assess_change(comparison, retrained_metrics) if triggered and retrained_metrics is not None else "not_retrained"
 
         pointer_updated = False
-        if retrained_bundle_path is not None and assessment != "hurt":
+        if retrained_bundle_path is not None and gate_passed and assessment not in {"hurt", "rejected_gate"}:
             pointer = load_active_model_pointer(args.model_pointer_path) or {}
             save_active_model_pointer(
                 args.model_pointer_path,
@@ -473,7 +535,11 @@ def train_command(args: argparse.Namespace) -> None:
                 feature_contract_path=pointer.get("feature_contract_path"),
                 threshold_path=retrained_bundle_path.with_suffix(".metadata.json"),
                 multiclass_threshold_path=pointer.get("multiclass_threshold_path"),
-                version=str(retrained_bundle.get("model_version") if retrained_bundle else None),
+                version=str(
+                    retrained_bundle.get("model_version")
+                    or retrained_bundle.get("retraining_meta", {}).get("model_version")
+                    or "retrained"
+                ),
                 extra={
                     "kind": "active_model_pointer",
                     "updated_by": "adaptive_retrain",
@@ -493,6 +559,13 @@ def train_command(args: argparse.Namespace) -> None:
                         "trigger_reason": trigger_reason,
                         "severity": drift_summary["severity"],
                         "assessment": assessment,
+                        "candidate_gate_passed": gate_passed,
+                        "candidate_gate_failures": gate_failures,
+                        "candidate_gate": {
+                            "min_pr_auc": DEFAULT_MIN_RETRAIN_PR_AUC,
+                            "min_attack_recall": DEFAULT_MIN_RETRAIN_ATTACK_RECALL,
+                            "min_normal_recall": DEFAULT_MIN_RETRAIN_NORMAL_RECALL,
+                        },
                         "pointer_updated": pointer_updated,
                         "original_metrics": original_metrics,
                         "retrained_metrics": retrained_metrics,
@@ -523,6 +596,8 @@ def train_command(args: argparse.Namespace) -> None:
                     "trigger_reason": trigger_reason,
                     "severity": drift_summary["severity"],
                     "assessment": assessment,
+                    "candidate_gate_passed": gate_passed,
+                    "candidate_gate_failures": gate_failures,
                     "pointer_updated": pointer_updated,
                     "retraining_source": split_label,
                     "original_metrics": original_metrics,
@@ -540,10 +615,11 @@ def train_command(args: argparse.Namespace) -> None:
         print(f"Trigger reason    : {trigger_reason}")
         print(f"Severity          : {drift_summary['severity']}")
         print("Original metrics:")
-        print(pd.Series(original_metrics)[["accuracy", "roc_auc", "pr_auc", "recall", "fnr"]].to_string())
+        print(pd.Series(original_metrics)[["roc_auc", "pr_auc", "recall", "normal_recall", "macro_recall", "fnr"]].to_string())
         if retrained_metrics is not None:
             print("Retrained metrics:")
-            print(pd.Series(retrained_metrics)[["accuracy", "roc_auc", "pr_auc", "recall", "fnr"]].to_string())
+            print(pd.Series(retrained_metrics)[["roc_auc", "pr_auc", "recall", "normal_recall", "macro_recall", "fnr"]].to_string())
+            print(f"Candidate gate    : {gate_passed} {gate_failures}")
         print(f"Assessment        : {assessment}")
         print(f"Trigger report    : {trigger_path}")
         print(f"Comparison report : {comparison_json_path}")

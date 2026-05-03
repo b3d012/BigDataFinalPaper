@@ -6,6 +6,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+import pandas as pd
+
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_MODELS_DIR = REPO_ROOT / "models"
@@ -157,3 +159,93 @@ def resolve_model_path(reference: str | Path, key: str = "binary_model_path") ->
     if not model_path:
         raise FileNotFoundError(f"Active model pointer {ref} does not contain {key}")
     return Path(model_path)
+
+
+def transformed_feature_names_from_bundle(bundle: dict[str, Any]) -> list[str]:
+    names = bundle.get("transformed_feature_names")
+    if names:
+        return [str(name) for name in names]
+
+    preprocessor = bundle.get("preprocessor")
+    if preprocessor is not None and hasattr(preprocessor, "get_feature_names_out"):
+        try:
+            return [str(name) for name in preprocessor.get_feature_names_out()]
+        except Exception:
+            pass
+
+    training_meta = bundle.get("training_meta", {})
+    return [str(name) for name in training_meta.get("feature_columns", [])]
+
+
+def attach_model_feature_names(bundle: dict[str, Any], feature_names: list[str] | None = None) -> list[str]:
+    names = feature_names or transformed_feature_names_from_bundle(bundle)
+    model = bundle.get("model")
+    if model is not None and names:
+        try:
+            setattr(model, "feature_names_", list(names))
+        except Exception:
+            pass
+    bundle["transformed_feature_names"] = list(names)
+    return list(names)
+
+
+def validate_runtime_contract(
+    *,
+    bundle: dict[str, Any],
+    model_input: pd.DataFrame,
+    transformed: Any | None = None,
+    transformed_feature_names: list[str] | None = None,
+    stage: str = "inference",
+) -> dict[str, Any]:
+    training_meta = bundle.get("training_meta", {})
+    feature_columns = [str(col) for col in training_meta.get("feature_columns", [])]
+    numeric_columns = [str(col) for col in training_meta.get("numeric_columns", [])]
+    categorical_columns = [str(col) for col in training_meta.get("categorical_columns", [])]
+
+    if not feature_columns:
+        raise ValueError(f"{stage}: model bundle is missing training_meta.feature_columns.")
+
+    input_columns = [str(col) for col in model_input.columns]
+    if input_columns != feature_columns:
+        missing = [col for col in feature_columns if col not in input_columns]
+        extra = [col for col in input_columns if col not in feature_columns]
+        raise ValueError(
+            f"{stage}: feature contract mismatch. Expected {len(feature_columns)} columns in training order. "
+            f"Missing={missing[:10]} Extra={extra[:10]}."
+        )
+
+    non_numeric = [col for col in numeric_columns if col in model_input.columns and not pd.api.types.is_numeric_dtype(model_input[col])]
+    if non_numeric:
+        raise TypeError(f"{stage}: numeric feature columns are not numeric after preprocessing: {non_numeric[:10]}.")
+
+    missing_categorical = [col for col in categorical_columns if col not in model_input.columns]
+    if missing_categorical:
+        raise ValueError(f"{stage}: categorical feature columns are missing: {missing_categorical[:10]}.")
+
+    names = attach_model_feature_names(bundle, transformed_feature_names)
+    model = bundle.get("model")
+    if transformed is not None:
+        transformed_columns = int(getattr(transformed, "shape", (0, 0))[1])
+        if names and transformed_columns != len(names):
+            raise ValueError(
+                f"{stage}: transformed vector length {transformed_columns} does not match "
+                f"{len(names)} transformed feature names."
+            )
+        model_n_features = getattr(model, "n_features_in_", None) if model is not None else None
+        if model_n_features is not None and int(model_n_features) != transformed_columns:
+            raise ValueError(
+                f"{stage}: transformed vector length {transformed_columns} does not match "
+                f"model.n_features_in_={model_n_features}."
+            )
+
+    model_feature_names = list(getattr(model, "feature_names_", names) or []) if model is not None else names
+    if names and model_feature_names and [str(name) for name in model_feature_names] != names:
+        raise ValueError(f"{stage}: model.feature_names_ does not match transformed feature names.")
+
+    return {
+        "stage": stage,
+        "feature_count": len(feature_columns),
+        "numeric_count": len(numeric_columns),
+        "categorical_count": len(categorical_columns),
+        "transformed_feature_count": len(names),
+    }

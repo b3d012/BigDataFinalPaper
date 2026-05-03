@@ -8,9 +8,10 @@
   },
   "default_threshold": {
     "threshold": 0.5,
-    "accuracy": 0.9752334603085625,
     "attack_precision": 0.9717596899792684,
     "attack_recall": 0.9997512906507895,
+    "normal_recall": 0.8413645528990576,
+    "macro_recall": 0.9205579217749236,
     "attack_fnr": 0.00024870934921053625,
     "attack_f1": 0.985556777318291,
     "attack_f2": 0.9940247014971433,
@@ -24,9 +25,10 @@
   "recommended": {
     "max_f1": {
       "threshold": 0.23,
-      "accuracy": 0.9752844202667754,
       "attack_precision": 0.9716784215498868,
       "attack_recall": 0.9999020235897049,
+      "normal_recall": 0.8408707460598329,
+      "macro_recall": 0.9203863848247689,
       "attack_fnr": 9.797641029505973e-05,
       "attack_f1": 0.985588209074471,
       "attack_f2": 0.9941268944472466,
@@ -37,8 +39,9 @@
       "delta_from_default": {
         "attack_precision": -8.126842938160905e-05,
         "attack_recall": 0.00015073293891543216,
+        "normal_recall": -0.0004938068392247308,
+        "macro_recall": -0.00017153695015470483,
         "attack_fnr": -0.00015073293891547653,
-        "accuracy": 5.095995821291499e-05,
         "attack_f1": 3.1431756179922665e-05,
         "attack_f2": 0.00010219295010327478
       },
@@ -46,9 +49,10 @@
     },
     "max_f2": {
       "threshold": 0.23,
-      "accuracy": 0.9752844202667754,
       "attack_precision": 0.9716784215498868,
       "attack_recall": 0.9999020235897049,
+      "normal_recall": 0.8408707460598329,
+      "macro_recall": 0.9203863848247689,
       "attack_fnr": 9.797641029505973e-05,
       "attack_f1": 0.985588209074471,
       "attack_f2": 0.9941268944472466,
@@ -59,8 +63,9 @@
       "delta_from_default": {
         "attack_precision": -8.126842938160905e-05,
         "attack_recall": 0.00015073293891543216,
+        "normal_recall": -0.0004938068392247308,
+        "macro_recall": -0.00017153695015470483,
         "attack_fnr": -0.00015073293891547653,
-        "accuracy": 5.095995821291499e-05,
         "attack_f1": 3.1431756179922665e-05,
         "attack_f2": 0.00010219295010327478
       },
@@ -68,9 +73,10 @@
     },
     "highest_recall_under_min_precision": {
       "threshold": 0.06,
-      "accuracy": 0.9752016103346796,
       "attack_precision": 0.9715651957410039,
       "attack_recall": 0.9999246335305423,
+      "normal_recall": 0.8402123369408666,
+      "macro_recall": 0.9200684852357044,
       "attack_fnr": 7.536646945773825e-05,
       "attack_f1": 0.9855409425681091,
       "attack_f2": 0.994121067349017,
@@ -81,8 +87,9 @@
       "delta_from_default": {
         "attack_precision": -0.00019449423826456425,
         "attack_recall": 0.0001733428797527914,
+        "normal_recall": -0.0011522159581910385,
+        "macro_recall": -0.0004894365392191791,
         "attack_fnr": -0.000173342879752798,
-        "accuracy": -3.184997388294697e-05,
         "attack_f1": -1.5834750181964452e-05,
         "attack_f2": 9.636585187366986e-05
       },
@@ -91,9 +98,10 @@
     },
     "lowest_fnr_under_min_precision": {
       "threshold": 0.05,
-      "accuracy": 0.9751761303555732,
       "attack_precision": 0.9715367378919465,
       "attack_recall": 0.9999246335305423,
+      "normal_recall": 0.840047734661125,
+      "macro_recall": 0.9199861840958337,
       "attack_fnr": 7.536646945773825e-05,
       "attack_f1": 0.9855263011282034,
       "attack_f2": 0.994115108301585,
@@ -104,8 +112,9 @@
       "delta_from_default": {
         "attack_precision": -0.00022295208732192595,
         "attack_recall": 0.0001733428797527914,
+        "normal_recall": -0.0013168182379326154,
+        "macro_recall": -0.000571737679089912,
         "attack_fnr": -0.000173342879752798,
-        "accuracy": -5.7329952989348953e-05,
         "attack_f1": -3.047619008766933e-05,
         "attack_f2": 9.040680444172278e-05
       },
@@ -115,9 +124,10 @@
   },
   "default_row_metrics": {
     "threshold": 0.5,
-    "accuracy": 0.9752334603085625,
     "attack_precision": 0.9717596899792684,
     "attack_recall": 0.9997512906507895,
+    "normal_recall": 0.8413645528990576,
+    "macro_recall": 0.9205579217749236,
     "attack_fnr": 0.00024870934921053625,
     "attack_f1": 0.985556777318291,
     "attack_f2": 0.9940247014971433,

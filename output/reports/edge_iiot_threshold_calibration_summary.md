@@ -19,6 +19,12 @@ PR-AUC is reported as context from the underlying probability scores; it does no
 - Best recall under precision constraint: 0.06
 - Lowest FNR under precision constraint: 0.05
 
+## Multiclass
+- Source: output\reports\edge_iiot_multiclass_holdout_predictions.csv
+- Output CSV: output\reports\edge_iiot_multiclass_thresholds.csv
+- Critical classes: Ransomware, MITM, DDoS_HTTP, DDoS_TCP, DDoS_UDP, DDoS_ICMP
+- Minimum precision: 0.97
+
 ## Why these thresholds are reasonable
 - They make the precision/recall tradeoff explicit for the binary attack detector.
 - The minimum-precision constraint prevents the paper from recommending thresholds that lower false alarms too aggressively at the expense of precision.

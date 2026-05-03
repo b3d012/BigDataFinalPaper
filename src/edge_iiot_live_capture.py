@@ -27,7 +27,14 @@ from edge_iiot_demo_replay import (
 from edge_iiot_adwin import ADWINMonitor
 from edge_iiot_thresholds import build_threshold_grid, compute_threshold_metrics, select_recommendations
 from edge_iiot_experiment import DEFAULT_EDGE_CSV, get_transformed_feature_names
-from edge_iiot_runtime import DEFAULT_ACTIVE_MODEL_POINTER_PATH, load_active_model_pointer, json_safe, resolve_model_path
+from edge_iiot_runtime import (
+    DEFAULT_ACTIVE_MODEL_POINTER_PATH,
+    attach_model_feature_names,
+    load_active_model_pointer,
+    json_safe,
+    resolve_model_path,
+    validate_runtime_contract,
+)
 from edge_iiot_drift import compare_batches, load_dataset_batches
 from edge_iiot_mongo import (
     ANALYSIS_SUMMARIES_COLLECTION,
@@ -229,13 +236,14 @@ def load_bundle(model_path: Path) -> dict[str, object]:
         binary_bundle = dict(binary_bundle)
         binary_bundle["model_version"] = pointer.get("version")
         binary_bundle["active_pointer"] = pointer
+        attach_model_feature_names(binary_bundle)
         attack_model_path = pointer.get("attack_model_path")
         if attack_model_path:
             attack_bundle = joblib.load(Path(attack_model_path))
             if {"model", "preprocessor", "classes_"}.difference(attack_bundle.keys()):
                 raise ValueError(f"Attack model bundle is missing required keys: {attack_model_path}")
             binary_bundle["attack_bundle"] = attack_bundle
-            binary_bundle["attack_model_version"] = attack_bundle.get("model_version")
+            binary_bundle["attack_model_version"] = attack_bundle.get("model_version") or pointer.get("version")
         return binary_bundle
 
     bundle = joblib.load(resolved_path)
@@ -243,6 +251,7 @@ def load_bundle(model_path: Path) -> dict[str, object]:
     missing = required - set(bundle.keys())
     if missing:
         raise ValueError(f"Model bundle is missing required keys: {sorted(missing)}")
+    attach_model_feature_names(bundle)
     return bundle
 
 
@@ -254,6 +263,7 @@ def load_anomaly_bundle(model_path: Path) -> dict[str, object] | None:
     missing = required - set(bundle.keys())
     if missing:
         raise ValueError(f"Anomaly bundle is missing required keys: {sorted(missing)}")
+    attach_model_feature_names(bundle)
     return bundle
 
 
@@ -504,6 +514,13 @@ def score_model_frame(
         attack_proba = attack_proba_matrix.max(axis=1)
 
     feature_names = get_transformed_feature_names(bundle["preprocessor"])
+    validate_runtime_contract(
+        bundle=bundle,
+        model_input=X,
+        transformed=transformed,
+        transformed_feature_names=feature_names,
+        stage="live_score_model_frame",
+    )
     shap_df = safe_mean_absolute_contrib(
         transformed,
         bundle["model"],
@@ -568,6 +585,73 @@ def score_anomaly_window(
     return scores, pred, anomaly_frame
 
 
+def score_benign_anomaly_window(
+    *,
+    raw_df: pd.DataFrame,
+    pred: np.ndarray,
+    raw_csv: Path,
+    anomaly_bundle: dict[str, object],
+    threshold: float,
+    interface: str,
+    source_file_tag: str,
+    window_id: int,
+    capture_mode: str,
+    true_label: int | None = None,
+) -> tuple[np.ndarray, np.ndarray, pd.DataFrame]:
+    scores = np.full(len(raw_df), np.nan, dtype=float)
+    anomaly_pred = np.zeros(len(raw_df), dtype=int)
+    benign_indices = np.flatnonzero(np.asarray(pred, dtype=int) == 0)
+    if len(benign_indices) == 0:
+        return scores, anomaly_pred, pd.DataFrame()
+
+    benign_df = raw_df.reset_index(drop=True).iloc[benign_indices].reset_index(drop=True)
+    X = prepare_window_frame(benign_df, anomaly_bundle)
+    transformed = anomaly_bundle["preprocessor"].transform(X)
+    feature_names = get_transformed_feature_names(anomaly_bundle["preprocessor"])
+    validate_runtime_contract(
+        bundle=anomaly_bundle,
+        model_input=X,
+        transformed=transformed,
+        transformed_feature_names=feature_names,
+        stage="live_benign_anomaly",
+    )
+    model = anomaly_bundle["model"]
+    try:
+        benign_scores = -np.asarray(model.decision_function(transformed), dtype=float)
+    except Exception:
+        benign_scores = -np.asarray(model.decision_function(transformed.toarray()), dtype=float)
+    benign_pred = (benign_scores >= threshold).astype(int)
+    scores[benign_indices] = benign_scores
+    anomaly_pred[benign_indices] = benign_pred
+
+    true_label_name = "Attack" if true_label == 1 else "Normal" if true_label == 0 else None
+    docs = []
+    raw_reset = raw_df.reset_index(drop=True)
+    for local_index, original_index in enumerate(benign_indices):
+        pred_label = int(benign_pred[local_index])
+        docs.append(
+            {
+                "kind": "live_anomaly_prediction",
+                "source": interface,
+                "source_file": source_file_tag,
+                "window_id": window_id,
+                "record_index": int(original_index),
+                "created_at": utc_now(),
+                "threshold": threshold,
+                "capture_mode": capture_mode,
+                "anomaly_score": float(benign_scores[local_index]),
+                "anomaly_pred_label": pred_label,
+                "anomaly_pred_name": "Anomaly" if pred_label else "Normal",
+                "true_label": true_label,
+                "true_label_name": true_label_name,
+                "correct": int(true_label == pred_label) if true_label is not None else None,
+                "raw_csv_path": str(raw_csv),
+                **raw_reset.iloc[int(original_index)].to_dict(),
+            }
+        )
+    return scores, anomaly_pred, pd.DataFrame(docs)
+
+
 def classify_attack_labels(attack_bundle: dict[str, object] | None, raw_df: pd.DataFrame) -> tuple[np.ndarray | None, np.ndarray | None]:
     if attack_bundle is None or raw_df.empty:
         return None, None
@@ -604,6 +688,9 @@ def assemble_alert_documents(
     alert_df: pd.DataFrame,
     threshold: float,
     true_label: int | None,
+    scoring_latency_ms: float | None = None,
+    shap_latency_ms: float | None = None,
+    shap_fallback: bool = False,
 ) -> list[dict[str, object]]:
     if alert_df.empty:
         return []
@@ -628,7 +715,7 @@ def assemble_alert_documents(
                 "abs_contribution": float(row["abs_contribution"]),
                 "rank": int(row["rank"]),
             }
-            for _, row in group.sort_values("rank").head(10).iterrows()
+                for _, row in group.sort_values("rank").head(3).iterrows()
         ]
         rows.append(
             {
@@ -651,7 +738,17 @@ def assemble_alert_documents(
                 "attack_type_name": attack_label_name,
                 "attack_type_proba": attack_label_score,
                 "true_label": true_label,
+                "alert_latency_ms": scoring_latency_ms,
+                "scoring_latency_ms": scoring_latency_ms,
+                "micro_batch_latency_ms": scoring_latency_ms,
+                "shap_latency_ms": shap_latency_ms,
+                "shap_fallback_summary_sampling": bool(shap_fallback),
                 "top_features": top_features,
+                "shap_payload": {
+                    "top_features": top_features,
+                    "shap_latency_ms": shap_latency_ms,
+                    "fallback_summary_sampling": bool(shap_fallback),
+                },
                 "base_value": float(group.iloc[0].get("base_value", 0.0)),
                 "expected_value": float(group.iloc[0].get("expected_value", 0.0)),
                 "raw_probability": float(proba[int(record_index)]) if int(record_index) < len(proba) else None,
@@ -698,6 +795,7 @@ def update_adwin_monitor(
     interface: str,
     source_file_tag: str,
     capture_mode: str,
+    batch_started_perf: float | None = None,
 ) -> tuple[dict[str, object], list[dict[str, object]]]:
     drift_events: list[dict[str, object]] = []
     state: dict[str, object] = {}
@@ -705,6 +803,8 @@ def update_adwin_monitor(
         confidence = float(max(float(score), 1.0 - float(score)))
         state = adwin.update(confidence)
         if state.get("drift_detected"):
+            if batch_started_perf is not None:
+                state = {**state, "drift_detection_latency_ms": float((time.perf_counter() - batch_started_perf) * 1000.0)}
             drift_events.append(
                 append_drift_event(
                     db=db,
@@ -917,6 +1017,7 @@ def score_window(
     shap_sample_rows: int,
     shap_top_n: int,
 ) -> tuple[pd.DataFrame, np.ndarray, np.ndarray, np.ndarray | None, np.ndarray | None, pd.DataFrame, pd.DataFrame]:
+    scoring_started = time.perf_counter()
     if not raw_csv.exists() or raw_csv.stat().st_size == 0:
         empty = pd.DataFrame()
         return empty, np.array([]), np.array([], dtype=int), None, None, empty, empty
@@ -933,22 +1034,55 @@ def score_window(
     pred = (proba >= threshold).astype(int)
     attack_proba, attack_pred = classify_attack_labels(bundle.get("attack_bundle"), df)
     feature_names = get_transformed_feature_names(bundle["preprocessor"])
+    validate_runtime_contract(
+        bundle=bundle,
+        model_input=X,
+        transformed=transformed,
+        transformed_feature_names=feature_names,
+        stage="live_score_window",
+    )
+    shap_started = time.perf_counter()
     shap_df = safe_mean_absolute_contrib(
         transformed,
         bundle["model"],
         feature_names,
         sample_rows=shap_sample_rows,
     )
-    shap_df = shap_df.head(15).copy()
-    shap_df["window_id"] = window_id
     alert_df = safe_alert_contribs(
         transformed,
         bundle["model"],
         feature_names,
         sample_rows=shap_sample_rows,
-        top_n=shap_top_n,
+        top_n=min(shap_top_n, 3),
     )
+    shap_latency_ms = float((time.perf_counter() - shap_started) * 1000.0)
+    shap_fallback = False
+    if shap_latency_ms > 50.0 and len(df) > 10:
+        fallback_rows = max(1, int(np.ceil(len(df) * 0.10)))
+        shap_started = time.perf_counter()
+        shap_df = safe_mean_absolute_contrib(
+            transformed,
+            bundle["model"],
+            feature_names,
+            sample_rows=fallback_rows,
+        )
+        alert_df = safe_alert_contribs(
+            transformed,
+            bundle["model"],
+            feature_names,
+            sample_rows=fallback_rows,
+            top_n=3,
+        )
+        shap_latency_ms = float((time.perf_counter() - shap_started) * 1000.0)
+        shap_fallback = True
+    shap_df = shap_df.head(15).copy()
+    shap_df["window_id"] = window_id
     alert_df["window_id"] = window_id
+    latency_ms = float((time.perf_counter() - scoring_started) * 1000.0)
+    for frame in (df, shap_df, alert_df):
+        frame.attrs["scoring_latency_ms"] = latency_ms
+        frame.attrs["shap_latency_ms"] = shap_latency_ms
+        frame.attrs["shap_fallback"] = shap_fallback
     return df, proba, pred, attack_proba, attack_pred, shap_df, alert_df
 
 
@@ -982,6 +1116,13 @@ def prediction_documents(
     attack_model_version: str | None = None,
     attack_bundle: dict[str, object] | None = None,
     true_label: int | None = None,
+    shap_by_record: dict[int, list[dict[str, object]]] | None = None,
+    drift_status: dict[str, object] | None = None,
+    anomaly_scores: np.ndarray | None = None,
+    anomaly_pred: np.ndarray | None = None,
+    scoring_latency_ms: float | None = None,
+    shap_latency_ms: float | None = None,
+    shap_fallback: bool = False,
 ) -> list[dict[str, object]]:
     true_label_name = "Attack" if true_label == 1 else "Normal" if true_label == 0 else None
     docs: list[dict[str, object]] = []
@@ -993,6 +1134,23 @@ def prediction_documents(
             attack_type_name = attack_class_name(attack_bundle, int(attack_pred[record_index]))
         if attack_proba is not None and record_index < len(attack_proba):
             attack_type_proba = float(attack_proba[record_index])
+        row_shap = (shap_by_record or {}).get(record_index, [])
+        anomaly_score = None
+        anomaly_pred_label = 0
+        if anomaly_scores is not None and record_index < len(anomaly_scores) and not np.isnan(anomaly_scores[record_index]):
+            anomaly_score = float(anomaly_scores[record_index])
+        if anomaly_pred is not None and record_index < len(anomaly_pred):
+            anomaly_pred_label = int(anomaly_pred[record_index])
+        anomaly_override = bool(pred_label == 0 and anomaly_pred_label == 1)
+        status = "Potential Evasion/Anomalous" if anomaly_override else ("Attack" if pred_label else "Normal")
+        prediction_payload = {
+            "pred_proba_attack": float(proba[record_index]),
+            "pred_label": pred_label,
+            "pred_label_name": "Attack" if pred_label else "Normal",
+            "attack_type_name": attack_type_name,
+            "attack_type_proba": attack_type_proba,
+            "status": status,
+        }
         payload = {
             "kind": "live_prediction",
             "source": interface,
@@ -1007,8 +1165,30 @@ def prediction_documents(
             "pred_proba_attack": float(proba[record_index]),
             "pred_label": pred_label,
             "pred_label_name": "Attack" if pred_label else "Normal",
+            "status": status,
+            "alert_flag": bool(pred_label == 1 or anomaly_override),
             "attack_type_name": attack_type_name,
             "attack_type_proba": attack_type_proba,
+            "prediction": prediction_payload,
+            "flow_data": row.to_dict(),
+            "shap_payload": {
+                "top_features": row_shap[:3],
+                "fallback_summary_sampling": bool(shap_fallback),
+                "shap_latency_ms": shap_latency_ms,
+            },
+            "drift_status": drift_status or {},
+            "anomaly_status": {
+                "checked": bool(pred_label == 0 and anomaly_scores is not None),
+                "score": anomaly_score,
+                "pred_label": anomaly_pred_label,
+                "status": "Anomaly" if anomaly_pred_label else "Normal",
+            },
+            "anomaly_override": anomaly_override,
+            "alert_latency_ms": scoring_latency_ms if bool(pred_label == 1 or anomaly_override) else None,
+            "scoring_latency_ms": scoring_latency_ms,
+            "micro_batch_latency_ms": scoring_latency_ms,
+            "shap_latency_ms": shap_latency_ms,
+            "shap_fallback_summary_sampling": bool(shap_fallback),
             "true_label": true_label,
             "true_label_name": true_label_name,
             "correct": int(true_label == pred_label) if true_label is not None else None,
@@ -1157,6 +1337,9 @@ def score_and_store_window(
     adwin_state: dict[str, object] | None = None,
 ) -> dict[str, object]:
     window_true_label = infer_window_true_label(source_file_tag=source_file_tag, injected_pcap_path=injected_pcap_path)
+    scoring_latency_ms = df.attrs.get("scoring_latency_ms")
+    shap_latency_ms = df.attrs.get("shap_latency_ms")
+    shap_fallback = bool(df.attrs.get("shap_fallback", False))
     raw_docs = packet_documents(
         window_id=window_id,
         interface=interface,
@@ -1167,6 +1350,11 @@ def score_and_store_window(
         true_label=window_true_label,
     )
     X = prepare_window_frame(df, bundle)
+    validate_runtime_contract(
+        bundle=bundle,
+        model_input=X,
+        stage="live_store_window_input",
+    )
     feature_docs = packet_documents(
         window_id=window_id,
         interface=interface,
@@ -1176,6 +1364,51 @@ def score_and_store_window(
         source_file_tag=source_file_tag,
         true_label=window_true_label,
     )
+    shap_by_record: dict[int, list[dict[str, object]]] = {}
+    if not alert_df.empty:
+        for record_index, group in alert_df.sort_values(["record_index", "rank"]).groupby("record_index", sort=True):
+            shap_by_record[int(record_index)] = [
+                {
+                    "feature": str(row["feature"]),
+                    "contribution": float(row["contribution"]),
+                    "abs_contribution": float(row["abs_contribution"]),
+                    "rank": int(row["rank"]),
+                }
+                for _, row in group.sort_values("rank").head(3).iterrows()
+            ]
+
+    anomaly_records = 0
+    anomaly_ratio = 0.0
+    anomaly_mean = 0.0
+    anomaly_median = 0.0
+    anomaly_p95 = 0.0
+    anomaly_max = 0.0
+    anomaly_scores = np.full(len(df), np.nan, dtype=float)
+    anomaly_pred = np.zeros(len(df), dtype=int)
+    if anomaly_bundle is not None:
+        anomaly_threshold = float(anomaly_bundle.get("threshold", 0.0))
+        anomaly_scores, anomaly_pred, anomaly_df = score_benign_anomaly_window(
+            raw_df=df,
+            pred=pred,
+            raw_csv=raw_csv,
+            anomaly_bundle=anomaly_bundle,
+            threshold=anomaly_threshold,
+            interface=interface,
+            source_file_tag=source_file_tag,
+            window_id=window_id,
+            capture_mode=capture_mode,
+            true_label=window_true_label,
+        )
+        if not anomaly_df.empty:
+            insert_documents(db[PREDICTIONS_COLLECTION], anomaly_df.to_dict(orient="records"))
+        anomaly_records = int(anomaly_pred.sum()) if len(anomaly_pred) else 0
+        anomaly_ratio = float(anomaly_records / len(anomaly_pred)) if len(anomaly_pred) else 0.0
+        valid_scores = anomaly_scores[~np.isnan(anomaly_scores)]
+        anomaly_mean = float(np.mean(valid_scores)) if len(valid_scores) else 0.0
+        anomaly_median = float(np.median(valid_scores)) if len(valid_scores) else 0.0
+        anomaly_p95 = float(np.quantile(valid_scores, 0.95)) if len(valid_scores) else 0.0
+        anomaly_max = float(np.max(valid_scores)) if len(valid_scores) else 0.0
+
     prediction_docs = prediction_documents(
         window_id=window_id,
         interface=interface,
@@ -1192,6 +1425,13 @@ def score_and_store_window(
         attack_model_version=attack_model_version,
         attack_bundle=bundle.get("attack_bundle"),
         true_label=window_true_label,
+        shap_by_record=shap_by_record,
+        drift_status=adwin_state or {},
+        anomaly_scores=anomaly_scores,
+        anomaly_pred=anomaly_pred,
+        scoring_latency_ms=float(scoring_latency_ms) if scoring_latency_ms is not None else None,
+        shap_latency_ms=float(shap_latency_ms) if shap_latency_ms is not None else None,
+        shap_fallback=shap_fallback,
     )
     for doc in prediction_docs:
         doc["raw_csv_path"] = str(raw_csv)
@@ -1214,6 +1454,9 @@ def score_and_store_window(
             alert_df=alert_df,
             threshold=threshold,
             true_label=window_true_label,
+            scoring_latency_ms=float(scoring_latency_ms) if scoring_latency_ms is not None else None,
+            shap_latency_ms=float(shap_latency_ms) if shap_latency_ms is not None else None,
+            shap_fallback=shap_fallback,
         )
         if alert_docs:
             insert_documents(db[ALERT_EXPLANATIONS_COLLECTION], alert_docs)
@@ -1253,33 +1496,6 @@ def score_and_store_window(
         injected_pcap_path=injected_pcap_path,
     )
     upsert_documents(db[LIVE_WINDOWS_COLLECTION], [summary], ["kind", "source_file", "window_id"])
-
-    anomaly_records = 0
-    anomaly_ratio = 0.0
-    anomaly_mean = 0.0
-    anomaly_median = 0.0
-    anomaly_p95 = 0.0
-    anomaly_max = 0.0
-    if anomaly_bundle is not None:
-        anomaly_threshold = float(anomaly_bundle.get("threshold", 0.0))
-        anomaly_scores, anomaly_pred, anomaly_df = score_anomaly_window(
-            raw_df=df,
-            raw_csv=raw_csv,
-            anomaly_bundle=anomaly_bundle,
-            threshold=anomaly_threshold,
-            interface=interface,
-            source_file_tag=source_file_tag,
-            window_id=window_id,
-            capture_mode=capture_mode,
-            true_label=window_true_label,
-        )
-        insert_documents(db[PREDICTIONS_COLLECTION], anomaly_df.to_dict(orient="records"))
-        anomaly_records = int(anomaly_pred.sum()) if len(anomaly_pred) else 0
-        anomaly_ratio = float(anomaly_records / len(anomaly_pred)) if len(anomaly_pred) else 0.0
-        anomaly_mean = float(np.mean(anomaly_scores)) if len(anomaly_scores) else 0.0
-        anomaly_median = float(np.median(anomaly_scores)) if len(anomaly_scores) else 0.0
-        anomaly_p95 = float(np.quantile(anomaly_scores, 0.95)) if len(anomaly_scores) else 0.0
-        anomaly_max = float(np.max(anomaly_scores)) if len(anomaly_scores) else 0.0
 
     if drift_reference_raw is not None and not df.empty:
         live_drift_scores, live_drift_summary = score_live_drift(
@@ -1363,6 +1579,7 @@ def process_injection_queue(
             packet_count=packet_count,
             timeout_seconds=tshark_timeout_seconds,
         )
+        batch_started_perf = time.perf_counter()
         df, proba, pred, attack_proba, attack_pred, shap_df, alert_df = score_window(
             window_id=window_id,
             raw_csv=raw_csv,
@@ -1379,6 +1596,7 @@ def process_injection_queue(
             interface=interface,
             source_file_tag=source_file_tag,
             capture_mode="pcap_injection",
+            batch_started_perf=batch_started_perf,
         )
         if drift_events and trigger_retrain is not None:
             trigger_retrain(
@@ -1545,6 +1763,7 @@ def record_loop(args: argparse.Namespace) -> None:
 
         def _run_retrain() -> None:
             try:
+                retrain_started_perf = time.perf_counter()
                 proc = launch_retrain_job(
                     retrain_script=REPO_ROOT / "src" / "edge_iiot_retrain.py",
                     classifier_bundle=bundle_path,
@@ -1561,6 +1780,17 @@ def record_loop(args: argparse.Namespace) -> None:
                 exit_code = proc.wait()
                 retrain_state["last_exit_code"] = int(exit_code)
                 retrain_state["last_finished_at"] = utc_now().isoformat()
+                retrain_wall_clock_seconds = float(time.perf_counter() - retrain_started_perf)
+                retrain_state["last_wall_clock_seconds"] = retrain_wall_clock_seconds
+                comparison_path = Path(args.output_dir).parent / "reports" / "edge_iiot_retrain_comparison.json"
+                comparison_payload = read_status(comparison_path)
+                candidate_gate_passed = bool(comparison_payload.get("candidate_gate_passed", False)) if comparison_payload else False
+                assessment = comparison_payload.get("assessment") if comparison_payload else None
+                accepted = bool(
+                    exit_code == 0
+                    and candidate_gate_passed
+                    and assessment not in {"hurt", "rejected_gate"}
+                )
                 result_doc = {
                     "kind": "live_retrain_result",
                     "source": args.interface,
@@ -1571,7 +1801,11 @@ def record_loop(args: argparse.Namespace) -> None:
                     "exit_code": int(exit_code),
                     "model_pointer_path": str(args.model_pointer_path),
                     "model_path": str(bundle_path),
-                    "accepted": bool(exit_code == 0),
+                    "accepted": accepted,
+                    "candidate_gate_passed": candidate_gate_passed,
+                    "candidate_gate_failures": comparison_payload.get("candidate_gate_failures") if comparison_payload else None,
+                    "assessment": assessment,
+                    "retrain_wall_clock_seconds": retrain_wall_clock_seconds,
                 }
                 insert_documents(db[RETRAIN_EVENTS_COLLECTION], [result_doc])
                 status_update = {
@@ -1729,6 +1963,7 @@ def record_loop(args: argparse.Namespace) -> None:
                         time.sleep(args.pause_seconds)
                     continue
 
+                batch_started_perf = time.perf_counter()
                 df, proba, pred, attack_proba, attack_pred, shap_df, alert_df = score_window(
                     window_id=current_window_id,
                     raw_csv=raw_csv,
@@ -1793,6 +2028,7 @@ def record_loop(args: argparse.Namespace) -> None:
                     interface=args.interface,
                     source_file_tag=source_file_tag,
                     capture_mode="live_capture",
+                    batch_started_perf=batch_started_perf,
                 )
                 if drift_events and args.auto_retrain:
                     trigger_retrain(
@@ -1907,14 +2143,14 @@ def build_parser() -> argparse.ArgumentParser:
     live_parser.add_argument("--file_ratio_threshold", type=float, default=0.4)
     live_parser.add_argument("--min_records", type=int, default=1)
     live_parser.add_argument("--shap_sample_rows", type=int, default=50)
-    live_parser.add_argument("--shap_top_n", type=int, default=15)
+    live_parser.add_argument("--shap_top_n", type=int, default=3)
     live_parser.add_argument("--drift_n_bins", type=int, default=DEFAULT_DRIFT_N_BINS)
     live_parser.add_argument("--drift_min_category_count", type=int, default=DEFAULT_DRIFT_MIN_CATEGORY_COUNT)
     live_parser.add_argument("--numeric_threshold", type=float, default=0.95)
     live_parser.add_argument("--adwin_delta", type=float, default=DEFAULT_ADWIN_DELTA)
     live_parser.add_argument("--adwin_min_window", type=int, default=DEFAULT_ADWIN_MIN_WINDOW)
     live_parser.add_argument("--adwin_max_window", type=int, default=DEFAULT_ADWIN_MAX_WINDOW)
-    live_parser.add_argument("--auto_retrain", action="store_true")
+    live_parser.add_argument("--auto_retrain", action=argparse.BooleanOptionalAction, default=True)
     live_parser.add_argument("--model_pointer_path", default=str(DEFAULT_MODEL_POINTER_PATH))
     live_parser.add_argument("--retrain_recent_rows", type=int, default=5000)
     live_parser.add_argument("--retrain_min_category_count", type=int, default=20)

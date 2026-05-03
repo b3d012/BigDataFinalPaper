@@ -18,6 +18,7 @@
   "drift_rows": 31397,
   "evaluation_rows": 31397,
   "split_strategy": "contiguous_60_20_20",
+  "retraining_source": "dataset",
   "top_features": [
     {
       "rank": 1,
@@ -200,5 +201,5 @@
       "bin_count": 10
     }
   ],
-  "dataset": "data/ML-EdgeIIoT-dataset.csv"
+  "dataset": "data\\ML-EdgeIIoT-dataset.csv"
 }

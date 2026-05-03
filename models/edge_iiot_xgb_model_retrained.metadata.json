@@ -658,6 +658,7 @@
       "drift_rows": 31397,
       "evaluation_rows": 31397,
       "split_strategy": "contiguous_60_20_20",
+      "retraining_source": "dataset",
       "top_features": [
         {
           "rank": 1,
@@ -840,19 +841,23 @@
           "bin_count": 10
         }
       ],
-      "dataset": "data/ML-EdgeIIoT-dataset.csv"
+      "dataset": "data\\ML-EdgeIIoT-dataset.csv"
     },
     "assessment_basis": "evaluation_target_last_20_percent",
     "reference_rows": 94192,
     "drift_rows": 31397,
-    "evaluation_rows": 31397
+    "evaluation_rows": 31397,
+    "source": "dataset",
+    "model_version": "20260503T213545Z"
   },
   "evaluation_metrics": {
-    "accuracy": 0.9921648565149537,
     "roc_auc": 0.9932354791358784,
     "pr_auc": 0.9987756448350067,
     "precision": 0.9914684053547895,
     "recall": 1.0,
+    "attack_recall": 1.0,
+    "normal_recall": 0.9124243503025988,
+    "macro_recall": 0.9562121751512994,
     "fnr": 0.0,
     "tn": 2563,
     "fp": 246,
@@ -871,7 +876,6 @@
         "f1-score": 0.9957159276932186,
         "support": 28588.0
       },
-      "accuracy": 0.9921648565149537,
       "macro avg": {
         "precision": 0.9957342026773948,
         "recall": 0.9562121751512994,
@@ -887,6 +891,6 @@
     }
   },
   "runtime": {
-    "train_seconds": 155.66460729998653
+    "train_seconds": 185.09206769999582
   }
 }

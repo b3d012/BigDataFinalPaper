@@ -12,7 +12,8 @@ import joblib
 import numpy as np
 import pandas as pd
 
-from edge_iiot_experiment import coerce_feature_types, normalize_columns
+from edge_iiot_experiment import coerce_feature_types, get_transformed_feature_names, normalize_columns
+from edge_iiot_runtime import attach_model_feature_names, validate_runtime_contract
 
 
 DEFAULT_DEMO_DIR = Path("demo")
@@ -273,7 +274,15 @@ def score_pcap_csv(
         return df, np.array([]), np.array([], dtype=int)
 
     X = prepare_model_input(df, bundle)
-    proba = bundle["model"].predict_proba(bundle["preprocessor"].transform(X))[:, 1]
+    transformed = bundle["preprocessor"].transform(X)
+    validate_runtime_contract(
+        bundle=bundle,
+        model_input=X,
+        transformed=transformed,
+        transformed_feature_names=get_transformed_feature_names(bundle["preprocessor"]),
+        stage="demo_replay_score",
+    )
+    proba = bundle["model"].predict_proba(transformed)[:, 1]
     pred = (proba >= threshold).astype(int)
     return df, proba, pred
 
@@ -445,6 +454,7 @@ def load_bundle(model_path: Path) -> dict[str, object]:
     missing = required - set(bundle.keys())
     if missing:
         raise ValueError(f"Model bundle is missing required keys: {sorted(missing)}")
+    attach_model_feature_names(bundle)
     return bundle
 
 

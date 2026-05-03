@@ -1,8 +1,53 @@
 {
-  "threshold": 0.5,
-  "threshold_strategy": "fixed",
-  "fixed_threshold": 0.5,
-  "threshold_meta": {},
+  "classifier_bundle_path": "models/edge_iiot_xgb_model.joblib",
+  "anomaly_bundle_path": "models/edge_iiot_isolation_forest.joblib",
+  "attack_sample_count": 500,
+  "epsilon": 0.05,
+  "pgd_steps": 5,
+  "pgd_step_size": 0.01,
+  "clean_metrics": {
+    "attack_recall": 0.936,
+    "attack_fnr": 0.06399999999999995,
+    "confusion_matrix": [
+      [
+        469,
+        31
+      ],
+      [
+        32,
+        468
+      ]
+    ],
+    "pr_auc": 0.992097237452429
+  },
+  "fgsm_metrics": {
+    "attack_recall": 0.928,
+    "attack_fnr": 0.07199999999999995,
+    "mean_attack_probability": 0.9276259541511536,
+    "min_attack_probability": 0.08671826124191284
+  },
+  "pgd_metrics": {
+    "attack_recall": 0.928,
+    "attack_fnr": 0.07199999999999995,
+    "mean_attack_probability": 0.9276259541511536,
+    "min_attack_probability": 0.08671826124191284
+  },
+  "deltas": {
+    "fgsm_recall_delta": -0.008000000000000007,
+    "pgd_recall_delta": -0.008000000000000007
+  },
+  "anomaly_metrics": {
+    "fgsm_mean_score": 0.13024909258602527,
+    "pgd_mean_score": 0.13024909258602527,
+    "fgsm_anomaly_tpr": 0.022,
+    "pgd_anomaly_tpr": 0.022
+  },
+  "runtime": {
+    "rows_total": 5000,
+    "train_rows": 4000,
+    "test_rows": 1000,
+    "fit_seconds": 0.0
+  },
   "training_meta": {
     "edge_csv": "data/ML-EdgeIIoT-dataset.csv",
     "original_rows": 157800,
@@ -335,61 +380,5 @@
       "mbtcp.trans_id": 156986,
       "mbtcp.unit_id": 156986
     }
-  },
-  "evaluation_metrics": {
-    "roc_auc": 0.9926124530799378,
-    "pr_auc": 0.9985420373511485,
-    "precision": 0.989763779527559,
-    "recall": 0.9473208229708343,
-    "fnr": 0.052679177029165726,
-    "tn": 4600,
-    "fp": 260,
-    "fn": 1398,
-    "tp": 25140,
-    "classification_report": {
-      "Normal": {
-        "precision": 0.7669223074358119,
-        "recall": 0.9465020576131687,
-        "f1-score": 0.8473015288266715,
-        "support": 4860.0
-      },
-      "Attack": {
-        "precision": 0.989763779527559,
-        "recall": 0.9473208229708343,
-        "f1-score": 0.9680773229619931,
-        "support": 26538.0
-      },
-      "macro avg": {
-        "precision": 0.8783430434816855,
-        "recall": 0.9469114402920016,
-        "f1-score": 0.9076894258943323,
-        "support": 31398.0
-      },
-      "weighted avg": {
-        "precision": 0.9552708323855152,
-        "recall": 0.9471940887954646,
-        "f1-score": 0.9493828086777183,
-        "support": 31398.0
-      }
-    },
-    "normal_recall": 0.9465020576131687,
-    "attack_recall": 0.9473208229708343,
-    "macro_recall": 0.9469114402920016
-  },
-  "runtime": {
-    "rows_total": 156986,
-    "features_total": 32,
-    "train_rows_threshold_model": 100470,
-    "validation_rows": 25118,
-    "test_rows": 31398,
-    "threshold_model_fit_seconds": 1.9189536000194494,
-    "validation_predict_seconds": 0.03730540000833571,
-    "eval_model_fit_seconds": 2.135511200001929,
-    "test_predict_seconds": 0.04467679999652319,
-    "test_predict_rows_per_second": 702780.8617099577,
-    "final_model_fit_seconds": 2.601530099986121,
-    "fit_bundle_seconds": 6.898637599981157,
-    "preprocessing_seconds": 94.86862449999899,
-    "train_command_total_seconds": 101.78525319998153
   }
 }

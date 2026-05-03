@@ -1,0 +1,46 @@
+1. Feature Contract Guardrail (Live Update Required)
+Strict Enforcement: Codex must ensure the Feature Contract (a canonical schema) is strictly adhered to throughout the system.
+Live Capture Requirement: Any feature extracted from the live window capture (e.g., packet rates, IAT skewness) must pass through the exact same scaling and encoding pipeline used for the ML-EdgeIIOT training set.
+Double-Check: Before inference, Codex must verify that the input vector length and data types match the model.feature_names_ attribute perfectly, ensuring that no discrepancies exist between training and live inference.
+2. Adaptive Retraining & Drift Detection Logic
+ADWIN-Based Drift Detection: Codex must track the rolling mean of max class probabilities in real-time. If the ADWIN shift detector (δ = 0.002) triggers, Codex must automatically initiate the retraining script using the latest window of N flows from MongoDB.
+Retraining Protocol:
+Shadow Model Approach: The system must not stop the live capture during retraining. Codex should ensure that the new model is trained in the background while live inference continues. The updated model is validated against performance targets (e.g., PR-AUC > 0.92) and then swapped into the live inference thread without downtime.
+Hot-Swapping: Codex should immediately swap the retrained model into the live pipeline, replacing the old one seamlessly.
+3. Class Imbalance & Evaluation Strictness
+Accuracy Metric Avoidance: Codex must strictly avoid using accuracy_score as a metric due to class imbalance in datasets like ML-EdgeIIOT. Instead, Codex should focus on PR-AUC (macro) and Per-class Recall for evaluation.
+SMOTE Application: Codex must apply SMOTE oversampling only to the training split. It must never apply SMOTE to the validation or test splits to avoid data leakage.
+Cost-Sensitive Learning: Codex must calculate scale_pos_weight dynamically based on the per-class benign-to-attack ratio, ensuring that the loss function penalizes false negatives for high-severity attack categories.
+4. Adversarial & Anomaly Layer (Live Check)
+Benign Flow Anomaly Detection: Every flow predicted as benign by GBoost must be passed through the Isolation Forest for anomaly detection.
+Secondary Screen (Override): If the Isolation Forest flags a Benign flow as an outlier, Codex must override the status to "Potential Evasion/Anomalous" and trigger an alert in the MongoDB record.
+Live Capture Requirement: Codex must ensure that this secondary screen is applied continuously in real-time for all live captures, preventing any benign flows from being mistakenly classified inappropriately.
+5. SHAP Explainability Constraints
+SHAP Latency Management:
+Codex must ensure that SHAP attribution does not push micro-batch processing time beyond the 50ms threshold. If latency exceeds this, Codex should switch to a Summary SHAP approach, sampling 10% of flows, or optimize the TreeExplainer.
+Attribution Rule: For every alert, Codex must append the top-3 SHAP contributors to the MongoDB alert document. This ensures that alerts are clinically actionable and can be understood by clinicians and compliance officers.
+6. Pipeline Hierarchy for Codex Double-Checking
+
+Codex must verify its work at each pipeline stage to ensure accuracy, consistency, and performance:
+
+Ingestion Check: Validate that the live window capture JSON matches the ML-EdgeIIOT feature names before processing.
+Preprocessing Check: Ensure that scale_pos_weight is recalculated if the data distribution shifts. Codex must verify that all preprocessing steps are applied identically to both training and live data.
+Inference Check: Apply per-class thresholds (optimized via PR curves) instead of the default 0.5 threshold during live inference.
+Storage Check: Confirm that every MongoDB record contains Flow Data, Prediction, SHAP Payload, and Drift Status to ensure full traceability and transparency.
+7. Operational Metrics & Monitoring
+End-to-End Latency: Codex must monitor and ensure the end-to-end latency from flow ingestion to alert writing to MongoDB stays below 50ms per micro-batch.
+Throughput: Codex should validate that the system can handle a high number of flows per second (throughput) under simulated IoMT load without compromising performance.
+Drift Detection Latency: Codex must ensure timely detection of drift, with minimal latency from drift onset to ADWIN trigger.
+Retraining Convergence: Monitor the wall-clock time from drift trigger to model hot-swap, ensuring that retraining and model replacement happen quickly without interrupting the live system.
+8. Adversarial Robustness & Evaluation
+Adversarial Attack Mitigation: Codex must continually test the system’s robustness against FGSM and PGD attacks. The model should be adversarially robust, with accuracy drops limited to around 70-80% under these perturbations.
+Isolation Forest for Adversarial Protection: The Isolation Forest layer acts as a secondary screen to detect evasion attempts, improving robustness and increasing the true-positive rate on adversarial flows.
+Summary of Key Combined Criteria:
+Feature Consistency: Ensure the live data pipeline matches the training data pipeline perfectly.
+Adaptive Retraining: Implement shadow models and retrain in the background without downtime when concept drift is detected.
+Class Imbalance Handling: Focus on PR-AUC and per-class recall metrics, and ensure SMOTE oversampling is applied only during training.
+Adversarial Detection: Use Isolation Forest to detect anomalous benign flows and ensure they trigger alerts when flagged.
+SHAP Attribution: Ensure latency remains under 50ms and top-3 feature attribution is included for clinical usability.
+Pipeline Verification: Double-check the integrity and correctness of data at each stage of the pipeline (from ingestion to storage).
+Operational Monitoring: Continuously monitor latency, throughput, and retraining performance to ensure system reliability.
+Adversarial Robustness: Continuously assess and mitigate adversarial attacks using the Isolation Forest anomaly layer.

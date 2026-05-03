@@ -10,3 +10,4 @@ streamlit
 plotly
 streamlit-autorefresh
 pymongo
+pytest

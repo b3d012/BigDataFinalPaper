@@ -11,8 +11,15 @@ from sklearn.metrics import average_precision_score, confusion_matrix, precision
 from sklearn.model_selection import train_test_split
 
 from edge_iiot_anomaly import load_bundle as load_anomaly_bundle
-from edge_iiot_experiment import DEFAULT_EDGE_CSV, prepare_training_frame
-from edge_iiot_runtime import json_safe, write_json
+from edge_iiot_experiment import (
+    DEFAULT_EDGE_CSV,
+    build_binary_labels,
+    coerce_feature_types,
+    get_transformed_feature_names,
+    normalize_columns,
+    read_csv,
+)
+from edge_iiot_runtime import attach_model_feature_names, json_safe, validate_runtime_contract, write_json
 
 
 def load_classifier_bundle(model_path: str | Path) -> dict[str, Any]:
@@ -23,6 +30,7 @@ def load_classifier_bundle(model_path: str | Path) -> dict[str, Any]:
     missing = required - set(bundle.keys())
     if missing:
         raise ValueError(f"Classifier bundle is missing required keys: {sorted(missing)}")
+    attach_model_feature_names(bundle)
     return bundle
 
 
@@ -98,6 +106,50 @@ def _classify_with_bundle(bundle: dict[str, Any], X_raw: pd.DataFrame) -> np.nda
     return bundle["model"].predict_proba(tx)[:, 1]
 
 
+def prepare_contract_frame(
+    edge_csv: str | Path,
+    training_meta: dict[str, Any],
+    *,
+    sample_rows: int | None,
+) -> tuple[pd.DataFrame, pd.Series]:
+    df = read_csv(edge_csv, sample_rows=None)
+    df = normalize_columns(df).drop_duplicates()
+    y, _ = build_binary_labels(df)
+    if sample_rows is not None and sample_rows > 0 and sample_rows < len(df):
+        sample_indices = []
+        per_class = max(1, sample_rows // max(1, int(y.nunique())))
+        for _, class_indices in y.groupby(y).groups.items():
+            take = min(per_class, len(class_indices))
+            sample_indices.extend(pd.Index(class_indices).to_series().sample(n=take, random_state=42).tolist())
+        if len(sample_indices) < sample_rows:
+            remaining = pd.Index(df.index).difference(sample_indices)
+            take = min(sample_rows - len(sample_indices), len(remaining))
+            if take:
+                sample_indices.extend(remaining.to_series().sample(n=take, random_state=43).tolist())
+        sample_indices = sorted(sample_indices)
+        df = df.loc[sample_indices].reset_index(drop=True)
+        y = y.loc[sample_indices].reset_index(drop=True)
+    feature_columns = list(training_meta["feature_columns"])
+    numeric_columns = list(training_meta.get("numeric_columns", []))
+    categorical_columns = list(training_meta.get("categorical_columns", []))
+
+    work = pd.DataFrame(index=df.index)
+    for column in feature_columns:
+        if column in df.columns:
+            work[column] = df[column]
+        elif column in numeric_columns:
+            work[column] = np.nan
+        else:
+            work[column] = "__MISSING__"
+
+    typed, _, _, _ = coerce_feature_types(
+        work[feature_columns],
+        numeric_columns=numeric_columns,
+        categorical_columns=categorical_columns,
+    )
+    return typed[feature_columns].reset_index(drop=True), y.reset_index(drop=True)
+
+
 def evaluate_robustness(
     *,
     classifier_bundle_path: str | Path,
@@ -112,13 +164,7 @@ def evaluate_robustness(
     classifier_bundle = load_classifier_bundle(classifier_bundle_path)
     anomaly_bundle = load_anomaly_bundle(Path(anomaly_bundle_path)) if anomaly_bundle_path else None
 
-    X, y, training_meta = prepare_training_frame(
-        edge_csv,
-        keep_identity_payload=False,
-        numeric_threshold=0.95,
-        sample_rows=sample_rows,
-        drop_duplicates=True,
-    )
+    X, y = prepare_contract_frame(edge_csv, classifier_bundle["training_meta"], sample_rows=sample_rows)
     train_idx, test_idx = train_test_split(
         np.arange(len(X)),
         test_size=0.2,
@@ -134,6 +180,13 @@ def evaluate_robustness(
     surrogate = _fit_surrogate(_dense(surrogate_X), y_train.to_numpy())
 
     test_tx = classifier_bundle["preprocessor"].transform(X_test)
+    validate_runtime_contract(
+        bundle=classifier_bundle,
+        model_input=X_test,
+        transformed=test_tx,
+        transformed_feature_names=get_transformed_feature_names(classifier_bundle["preprocessor"]),
+        stage="robustness_clean_score",
+    )
     test_dense = _dense(test_tx)
     lower = np.nanmin(test_dense, axis=0)
     upper = np.nanmax(test_dense, axis=0)
@@ -219,7 +272,7 @@ def evaluate_robustness(
             "test_rows": int(len(test_idx)),
             "fit_seconds": 0.0,
         },
-        "training_meta": training_meta,
+        "training_meta": classifier_bundle["training_meta"],
     }
     write_json(output_path, payload)
     return payload

@@ -1,0 +1,115 @@
+{
+  "date": "2026-05-03",
+  "dataset_note": "Edge-IIoT replaces the older IoMT dataset referenced by the methodology document.",
+  "stack": "tshark + MongoDB + Streamlit",
+  "status": "pass",
+  "artifacts": {
+    "binary_model": "models/edge_iiot_xgb_model.joblib",
+    "active_model_pointer": "models/edge_iiot_active_model.json",
+    "feature_contract": "models/edge_iiot_feature_contract.json",
+    "attack_model": "models/edge_iiot_attack_xgb_model.joblib",
+    "multiclass_summary": "output/reports/edge_iiot_multiclass_summary.json",
+    "multiclass_thresholds": "output/reports/edge_iiot_multiclass_thresholds.json",
+    "robustness": "output/reports/edge_iiot_adversarial_robustness.json"
+  },
+  "multiclass": {
+    "classes": 14,
+    "holdout_attack_rows": 26537,
+    "macro_recall": 0.8852480341619919,
+    "macro_f1": 0.8711252836046742,
+    "weighted_f1": 0.8982039818691084,
+    "critical_recalls": {
+      "DDoS_TCP": 1.0,
+      "DDoS_UDP": 1.0,
+      "DDoS_ICMP": 0.9989354151880766,
+      "DDoS_HTTP": 0.9034090909090909,
+      "MITM": 1.0,
+      "Ransomware": 0.882837528604119
+    }
+  },
+  "robustness": {
+    "clean_attack_recall": 0.936,
+    "fgsm_attack_recall": 0.928,
+    "pgd_attack_recall": 0.928,
+    "fgsm_recall_delta": -0.008,
+    "pgd_recall_delta": -0.008
+  },
+  "mongo_counts": {
+    "raw_packets": 172831,
+    "feature_vectors": 172831,
+    "predictions": 564084,
+    "alert_explanations": 321,
+    "live_windows": 18,
+    "drift_events": 10,
+    "retrain_events": 18
+  },
+  "live_pcap_windows": [
+    {
+      "name": "BENIGN_BASELINE",
+      "rows": 200,
+      "attack_rows": 54,
+      "anomaly_overrides": 100,
+      "window_label": "Normal"
+    },
+    {
+      "name": "NMAP_SYN_SCAN",
+      "rows": 200,
+      "attack_rows": 126,
+      "anomaly_overrides": 50,
+      "window_label": "Attack"
+    },
+    {
+      "name": "SSH_BRUTEFORCE_PATTERN",
+      "rows": 200,
+      "attack_rows": 190,
+      "anomaly_overrides": 3,
+      "window_label": "Attack"
+    },
+    {
+      "name": "HTTP_FLOOD_PATTERN",
+      "rows": 200,
+      "attack_rows": 194,
+      "anomaly_overrides": 1,
+      "window_label": "Attack"
+    },
+    {
+      "name": "UDP_FLOOD_PATTERN",
+      "rows": 200,
+      "attack_rows": 163,
+      "anomaly_overrides": 24,
+      "window_label": "Attack"
+    }
+  ],
+  "retraining": {
+    "adwin_delta": 0.002,
+    "accepted_live_candidate": true,
+    "accepted_assessment": "helped",
+    "rejected_candidate_reason": "normal_recall<0.50",
+    "active_pointer_uses_retrained_bundle": true
+  },
+  "alert_latency_ms": {
+    "stored_for_alert_explanations": true,
+    "alert_count": 321,
+    "min": 88.9715,
+    "mean": 1991.7795,
+    "max": 5381.4101,
+    "p95": 5381.4101,
+    "interpretation": "End-to-end bounded-window demo latency including extraction, feature preparation, scoring, SHAP attribution, MongoDB persistence, and dashboard traceability.",
+    "latest_latencycheck_nmap_ms": 441.7311
+  },
+  "commands": [
+    "python -m pytest -q",
+    "python -m compileall -q src tests",
+    "tshark -D",
+    "python src\\edge_iiot_experiment.py train_multiclass",
+    "python src\\edge_iiot_thresholds.py --multiclass_predictions output\\reports\\edge_iiot_multiclass_holdout_predictions.csv --multiclass_output output\\reports\\edge_iiot_multiclass_thresholds.json",
+    "python src\\edge_iiot_mongo.py seed",
+    "python src\\edge_iiot_live_capture.py live --interface 5 --tshark \"C:\\Program Files\\Wireshark\\tshark.exe\" --max_windows 1 --window_seconds 1 --packet_count 1 --validate_tshark_fields --mongo_uri mongodb://localhost:27017 --db_name edge_iiot_paper",
+    "python src\\edge_iiot_live_capture.py live --interface 5 --tshark \"C:\\Program Files\\Wireshark\\tshark.exe\" --inbox_dir output\\live\\inbox --max_windows 5 --window_seconds 1 --packet_count 200 --mongo_uri mongodb://localhost:27017 --db_name edge_iiot_paper",
+    "python src\\edge_iiot_mongo.py status"
+  ],
+  "caveats": [
+    "The local demo stack is not a distributed Spark/Kafka deployment.",
+    "Replayed PCAPs expose only fields available through tshark; absent Edge-IIoT training fields are imputed by the saved preprocessing contract."
+  ]
+}

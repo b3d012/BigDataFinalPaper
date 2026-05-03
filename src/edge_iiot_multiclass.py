@@ -159,6 +159,7 @@ def evaluate_attack_model(
         output_dict=True,
         zero_division=0,
     )
+    report = {name: values for name, values in report.items() if isinstance(values, dict)}
     cm = confusion_matrix(y_true, pred_idx, labels=list(range(len(classes))))
 
     per_class_pr_auc: dict[str, float] = {}
@@ -178,9 +179,10 @@ def evaluate_attack_model(
         "classification_report": report,
         "confusion_matrix": cm,
         "metrics": {
-            "accuracy": float(report["accuracy"]),
             "macro_f1": float(f1_score(y_true, pred_idx, average="macro")),
             "weighted_f1": float(f1_score(y_true, pred_idx, average="weighted")),
+            "macro_recall": float(report["macro avg"]["recall"]),
+            "weighted_recall": float(report["weighted avg"]["recall"]),
             "per_class_recall": per_class_recall,
             "per_class_pr_auc": per_class_pr_auc,
         },

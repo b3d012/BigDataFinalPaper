@@ -39,6 +39,7 @@ from edge_iiot_runtime import DEFAULT_ACTIVE_MODEL_POINTER_PATH
 REPO_ROOT = Path(__file__).resolve().parent.parent
 REPORT_DIR = REPO_ROOT / "output" / "reports"
 DEMO_DIR = REPO_ROOT / "output" / "demo"
+DEMO_PCAP_DIR = REPO_ROOT / "demo"
 FIGURE_DIR = REPO_ROOT / "output" / "figures"
 LIVE_WORKER = REPO_ROOT / "src" / "edge_iiot_live_capture.py"
 LIVE_INBOX_DIR = REPO_ROOT / "output" / "live" / "inbox"
@@ -58,11 +59,15 @@ LIVE_PREDICTION_KIND = "live_prediction"
 LIVE_ANOMALY_PREDICTION_KIND = "live_anomaly_prediction"
 LIVE_SHAP_IMPORTANCE_KIND = "live_shap"
 LIVE_DRIFT_IMPORTANCE_KIND = "live_drift"
+GLOBAL_SHAP_IMPORTANCE_KIND = "shap"
+GLOBAL_DRIFT_IMPORTANCE_KIND = "drift"
 FRIENDLY_LABELS = {
     LIVE_PREDICTION_KIND: "Classifier (Live)",
     LIVE_ANOMALY_PREDICTION_KIND: "Anomaly (Live)",
     LIVE_SHAP_IMPORTANCE_KIND: "Shap (Live)",
     LIVE_DRIFT_IMPORTANCE_KIND: "Drift (Live)",
+    GLOBAL_SHAP_IMPORTANCE_KIND: "Global SHAP",
+    GLOBAL_DRIFT_IMPORTANCE_KIND: "Global Drift",
     "live": "Live",
     "holdout": "Holdout",
     "cv": "CV",
@@ -127,6 +132,45 @@ def metric_from_summary(summary: dict[str, object], key: str, default: float = 0
     return float(default)
 
 
+def format_feature_list(value) -> str:
+    if isinstance(value, list):
+        parts = []
+        for item in value:
+            if isinstance(item, dict):
+                feature = item.get("feature", "feature")
+                contribution = item.get("contribution", item.get("mean_abs_contrib", item.get("abs_contribution", "")))
+                if contribution == "":
+                    parts.append(str(feature))
+                else:
+                    try:
+                        parts.append(f"{feature} ({float(contribution):.4f})")
+                    except Exception:
+                        parts.append(f"{feature} ({contribution})")
+            else:
+                parts.append(str(item))
+        return " | ".join(parts)
+    if pd.isna(value) if not isinstance(value, (dict, list)) else False:
+        return ""
+    return str(value)
+
+
+def demo_pcap_frame() -> pd.DataFrame:
+    rows = []
+    if not DEMO_PCAP_DIR.exists():
+        return pd.DataFrame()
+    for path in sorted(DEMO_PCAP_DIR.iterdir()):
+        if path.is_file() and path.suffix.lower() in {".pcap", ".pcapng", ".cap"}:
+            rows.append(
+                {
+                    "pcap": path.name,
+                    "expected_label": "Benign" if infer_binary_label_from_name(path.name) == 0 else "Attack" if infer_binary_label_from_name(path.name) == 1 else "Unknown",
+                    "size_mb": round(path.stat().st_size / (1024 * 1024), 3),
+                    "modified": pd.Timestamp(path.stat().st_mtime, unit="s").isoformat(),
+                }
+            )
+    return pd.DataFrame(rows)
+
+
 def load_local_summary(kind: str) -> dict[str, object]:
     mapping = {
         "holdout_metrics": REPORT_DIR / "edge_iiot_holdout_metrics.json",
@@ -136,6 +180,10 @@ def load_local_summary(kind: str) -> dict[str, object]:
         "drift_summary": REPORT_DIR / "edge_iiot_drift_summary.json",
         "retrain_trigger": REPORT_DIR / "edge_iiot_retrain_trigger.json",
         "retrain_comparison": REPORT_DIR / "edge_iiot_retrain_comparison.json",
+        "multiclass_summary": REPORT_DIR / "edge_iiot_multiclass_summary.json",
+        "active_model_pointer": REPO_ROOT / "models" / "edge_iiot_active_model.json",
+        "feature_contract": REPO_ROOT / "models" / "edge_iiot_feature_contract.json",
+        "docx_alignment_verification": REPORT_DIR / "docx_alignment_verification.json",
         "threshold_calibration_summary": REPORT_DIR / "edge_iiot_threshold_calibration_summary.md",
         "anomaly_run_summary": REPORT_DIR / "edge_iiot_anomaly_run_summary.md",
         "drift_run_summary": REPORT_DIR / "edge_iiot_drift_run_summary.md",
@@ -686,8 +734,7 @@ def build_live_command(
         command.extend(["--threshold", str(threshold)])
     if no_metadata:
         command.append("--no_metadata")
-    if auto_retrain:
-        command.append("--auto_retrain")
+    command.append("--auto_retrain" if auto_retrain else "--no-auto_retrain")
     return command
 
 
@@ -870,8 +917,8 @@ def render_overview(mongo_uri: str, db_name: str, db_connected: bool) -> None:
             counts = {}
 
     cols = st.columns(5)
-    cols[0].metric("Accuracy", f"{metric_from_summary(summary, 'accuracy'):.4f}" if summary else "n/a")
-    cols[1].metric("PR-AUC", f"{metric_from_summary(summary, 'pr_auc'):.4f}" if summary else "n/a")
+    cols[0].metric("PR-AUC", f"{metric_from_summary(summary, 'pr_auc'):.4f}" if summary else "n/a")
+    cols[1].metric("Macro recall", f"{metric_from_summary(summary, 'macro_recall'):.4f}" if summary else "n/a")
     cols[2].metric("Recall", f"{metric_from_summary(summary, 'recall'):.4f}" if summary else "n/a")
     cols[3].metric("Attack FNR", f"{metric_from_summary(summary, 'fnr'):.4f}" if summary else "n/a")
     cols[4].metric("ROC-AUC", f"{metric_from_summary(summary, 'roc_auc'):.4f}" if summary else "n/a")
@@ -923,6 +970,69 @@ def render_overview(mongo_uri: str, db_name: str, db_connected: bool) -> None:
                         "drift_flag": drift_summary.get("drift_flag"),
                     }
                 )
+
+
+def render_model_artifacts(mongo_uri: str, db_name: str) -> None:
+    st.subheader("Model Artifacts and Demo Evidence")
+
+    pointer = load_summary_document(mongo_uri, db_name, "active_model_pointer")
+    contract = load_summary_document(mongo_uri, db_name, "feature_contract")
+    multiclass = load_summary_document(mongo_uri, db_name, "multiclass_summary")
+    verification = load_summary_document(mongo_uri, db_name, "docx_alignment_verification")
+
+    pointer_cols = st.columns(4)
+    pointer_cols[0].metric("Active version", str(pointer.get("version", "n/a")) if pointer else "n/a")
+    pointer_cols[1].metric("Raw features", len(contract.get("feature_columns", [])) if contract else 0)
+    pointer_cols[2].metric("Transformed features", len(contract.get("transformed_feature_names", [])) if contract else 0)
+    pointer_cols[3].metric("Attack classes", len(multiclass.get("training_meta", {}).get("attack_classes", [])) if multiclass else 0)
+
+    left, right = st.columns(2)
+    with left:
+        st.markdown("**Active pointer**")
+        if pointer:
+            st.json(
+                {
+                    "binary_model_path": pointer.get("binary_model_path"),
+                    "attack_model_path": pointer.get("attack_model_path"),
+                    "feature_contract_path": pointer.get("feature_contract_path"),
+                    "multiclass_threshold_path": pointer.get("multiclass_threshold_path"),
+                    "updated_by": pointer.get("updated_by"),
+                    "retraining_assessment": pointer.get("retraining_assessment"),
+                }
+            )
+        else:
+            st.info("No active model pointer found.")
+
+    with right:
+        st.markdown("**Attack-subtype model**")
+        metrics = multiclass.get("evaluation_metrics", {}) if multiclass else {}
+        if metrics:
+            metric_cols = st.columns(3)
+            metric_cols[0].metric("Macro recall", f"{float(metrics.get('macro_recall', 0.0)):.4f}")
+            metric_cols[1].metric("Macro F1", f"{float(metrics.get('macro_f1', 0.0)):.4f}")
+            metric_cols[2].metric("Weighted F1", f"{float(metrics.get('weighted_f1', 0.0)):.4f}")
+            st.info(
+                "Attack types are learned from the Edge-IIoT dataset's `Attack_type` column. "
+                "The Kali/demo PCAP filenames are used only as controlled demo labels for live windows; "
+                "they are not where the model learned the attack classes."
+            )
+            recalls = metrics.get("per_class_recall", {}) or {}
+            recall_rows = pd.DataFrame(
+                [{"attack_type": key, "recall": value} for key, value in recalls.items()]
+            ).sort_values("recall", ascending=False)
+            st.dataframe(recall_rows, use_container_width=True, height=260)
+        else:
+            st.info("No multiclass summary found.")
+
+    demo_df = demo_pcap_frame()
+    if not demo_df.empty:
+        st.markdown("**Demo PCAP library**")
+        st.dataframe(demo_df, use_container_width=True, height=260)
+
+    live_windows = pd.DataFrame(verification.get("live_pcap_windows", [])) if verification else pd.DataFrame()
+    if not live_windows.empty:
+        st.markdown("**Verified live injection windows**")
+        st.dataframe(live_windows, use_container_width=True, height=220)
 
 
 def render_predictions(mongo_uri: str, db_name: str) -> None:
@@ -980,6 +1090,9 @@ def render_predictions(mongo_uri: str, db_name: str) -> None:
                     "source_file",
                     "window_id",
                     "record_index",
+                    "status",
+                    "alert_flag",
+                    "anomaly_override",
                     "fold",
                     "true_label",
                     "true_label_name",
@@ -990,6 +1103,11 @@ def render_predictions(mongo_uri: str, db_name: str) -> None:
                     "attack_type_proba",
                     "model_version",
                     "attack_model_version",
+                    "drift_status.delta",
+                    "drift_status.drift_detected",
+                    "anomaly_status.status",
+                    "scoring_latency_ms",
+                    "micro_batch_latency_ms",
                     "correct",
                     "anomaly_score",
                     "anomaly_pred_label",
@@ -1002,12 +1120,21 @@ def render_predictions(mongo_uri: str, db_name: str) -> None:
 
 
 def render_feature_importance(mongo_uri: str, db_name: str) -> None:
-    st.subheader("Live SHAP and Drift")
+    st.subheader("SHAP and Drift")
 
-    tabs = st.tabs([friendly_label(LIVE_SHAP_IMPORTANCE_KIND), friendly_label(LIVE_DRIFT_IMPORTANCE_KIND)])
+    tabs = st.tabs(
+        [
+            friendly_label(GLOBAL_SHAP_IMPORTANCE_KIND),
+            friendly_label(LIVE_SHAP_IMPORTANCE_KIND),
+            friendly_label(GLOBAL_DRIFT_IMPORTANCE_KIND),
+            friendly_label(LIVE_DRIFT_IMPORTANCE_KIND),
+        ]
+    )
     view_specs = [
-        (tabs[0], LIVE_SHAP_IMPORTANCE_KIND, "Shap"),
-        (tabs[1], LIVE_DRIFT_IMPORTANCE_KIND, "Drift"),
+        (tabs[0], GLOBAL_SHAP_IMPORTANCE_KIND, "Global SHAP"),
+        (tabs[1], LIVE_SHAP_IMPORTANCE_KIND, "Live SHAP"),
+        (tabs[2], GLOBAL_DRIFT_IMPORTANCE_KIND, "Global drift"),
+        (tabs[3], LIVE_DRIFT_IMPORTANCE_KIND, "Live drift"),
     ]
     for tab, importance_type, short_name in view_specs:
         with tab:
@@ -1016,7 +1143,7 @@ def render_feature_importance(mongo_uri: str, db_name: str) -> None:
                 st.info(f"No {short_name.lower()} live rows available yet.")
                 continue
 
-            if importance_type == LIVE_DRIFT_IMPORTANCE_KIND and "psi" in df.columns:
+            if importance_type in {LIVE_DRIFT_IMPORTANCE_KIND, GLOBAL_DRIFT_IMPORTANCE_KIND} and "psi" in df.columns:
                 sort_column = "psi"
             elif "normalized_importance" in df.columns:
                 sort_column = "normalized_importance"
@@ -1025,18 +1152,21 @@ def render_feature_importance(mongo_uri: str, db_name: str) -> None:
             else:
                 sort_column = df.columns[0]
 
-            upper_bound = max(5, min(50, len(df)))
+            upper_bound = max(1, min(50, len(df)))
+            min_top_n = 1
             default_top_n = min(15, upper_bound)
+            current_value = int(st.session_state.get(f"{importance_type}_top_n", default_top_n))
+            default_top_n = min(max(current_value, min_top_n), upper_bound)
             top_n = st.slider(
                 f"Top {short_name.lower()} features",
-                5,
+                min_top_n,
                 upper_bound,
                 default_top_n,
                 key=f"{importance_type}_top_n",
             )
             top_df = df.sort_values(sort_column, ascending=False).head(top_n)
             value_col = sort_column
-            if importance_type == LIVE_DRIFT_IMPORTANCE_KIND and "psi" in top_df.columns:
+            if importance_type in {LIVE_DRIFT_IMPORTANCE_KIND, GLOBAL_DRIFT_IMPORTANCE_KIND} and "psi" in top_df.columns:
                 value_col = "psi"
 
             cols = st.columns(3)
@@ -1049,7 +1179,7 @@ def render_feature_importance(mongo_uri: str, db_name: str) -> None:
                     x=top_df[value_col],
                     y=top_df["feature"],
                     orientation="h",
-                    marker_color="#4c78a8" if importance_type == LIVE_SHAP_IMPORTANCE_KIND else "#f58518",
+                    marker_color="#4c78a8" if "shap" in importance_type else "#f58518",
                 )
             )
             fig.update_layout(height=360, margin=dict(l=10, r=10, t=30, b=10))
@@ -1070,23 +1200,55 @@ def render_alert_explanations(mongo_uri: str, db_name: str) -> None:
     cols[0].metric("Rows", len(df))
     cols[1].metric("Windows", int(df["window_id"].nunique()) if "window_id" in df.columns else 0)
     cols[2].metric("Pred attack", int((df.get("pred_label", 0) == 1).sum()) if "pred_label" in df.columns else 0)
-    cols[3].metric("Model versions", int(df["model_version"].nunique()) if "model_version" in df.columns else 0)
+    if "alert_latency_ms" in df.columns and df["alert_latency_ms"].notna().any():
+        cols[3].metric("Latest alert latency", f"{float(df['alert_latency_ms'].dropna().iloc[0]):.1f} ms")
+    else:
+        cols[3].metric("Model versions", int(df["model_version"].nunique()) if "model_version" in df.columns else 0)
+
+    if "source_file" in df.columns and "alert_latency_ms" in df.columns and df["alert_latency_ms"].notna().any():
+        latency_summary = (
+            df.dropna(subset=["alert_latency_ms"])
+            .groupby("source_file", as_index=False)
+            .agg(
+                alerts=("alert_latency_ms", "size"),
+                min_latency_ms=("alert_latency_ms", "min"),
+                mean_latency_ms=("alert_latency_ms", "mean"),
+                max_latency_ms=("alert_latency_ms", "max"),
+                p95_latency_ms=("alert_latency_ms", lambda s: float(s.quantile(0.95))),
+            )
+            .sort_values("max_latency_ms", ascending=False)
+        )
+        for column in ["min_latency_ms", "mean_latency_ms", "max_latency_ms", "p95_latency_ms"]:
+            latency_summary[column] = latency_summary[column].astype(float).round(2)
+        st.markdown("**Alert latency by live/PCAP window**")
+        st.dataframe(latency_summary, use_container_width=True, height=220)
+
     display_cols = [
         column
         for column in [
             "window_id",
             "record_index",
             "prediction_id",
+            "source_file",
+            "status",
+            "alert_flag",
             "pred_label_name",
             "pred_proba_attack",
             "attack_type_name",
             "attack_type_proba",
+            "alert_latency_ms",
+            "scoring_latency_ms",
+            "shap_latency_ms",
+            "shap_fallback_summary_sampling",
             "model_version",
             "attack_model_version",
             "top_features",
         ]
         if column in df.columns
     ]
+    if "top_features" in df.columns:
+        df = df.copy()
+        df["top_features"] = df["top_features"].map(format_feature_list)
     st.dataframe(df[display_cols] if display_cols else df, use_container_width=True, height=360)
 
 
@@ -1229,10 +1391,10 @@ def render_live_capture(mongo_uri: str, db_name: str) -> None:
         file_ratio_threshold = st.slider("File ratio threshold", 0.0, 1.0, float(st.session_state.get("live_file_ratio_threshold", 0.4)), step=0.01)
         min_records = st.number_input("Minimum records", min_value=1, max_value=5000, value=int(st.session_state.get("live_min_records", 1)), step=1)
         shap_sample_rows = st.number_input("SHAP sample rows", min_value=1, max_value=1000, value=int(st.session_state.get("live_shap_sample_rows", 50)), step=5)
-        shap_top_n = st.number_input("SHAP top features", min_value=1, max_value=50, value=int(st.session_state.get("live_shap_top_n", 15)), step=1)
+        shap_top_n = st.number_input("SHAP top features", min_value=3, max_value=3, value=3, step=1)
         pause_seconds = st.number_input("Pause between windows", min_value=0.0, max_value=60.0, value=float(st.session_state.get("live_pause_seconds", 0.0)), step=0.5)
         max_windows = st.number_input("Max windows (0 = continuous)", min_value=0, max_value=100000, value=int(st.session_state.get("live_max_windows", 0)), step=1)
-        auto_retrain = st.checkbox("Auto retrain on drift", value=bool(st.session_state.get("live_auto_retrain", False)))
+        auto_retrain = st.checkbox("Auto retrain on drift", value=bool(st.session_state.get("live_auto_retrain", True)))
 
     st.session_state["live_interface"] = interface
     st.session_state["live_tshark"] = tshark_path
@@ -1366,11 +1528,19 @@ def render_live_capture(mongo_uri: str, db_name: str) -> None:
     live_placeholder = st.empty()
     with live_placeholder.container():
         latest = live_windows.iloc[0].to_dict() if not live_windows.empty else {}
-        cols = st.columns(4)
+        latest_alerts = load_live_alert_frame(mongo_uri, db_name, window_id=latest_window_id, limit=50) if latest_window_id is not None else pd.DataFrame()
+        if latest_alerts.empty:
+            latest_alerts = load_live_alert_frame(mongo_uri, db_name, window_id=None, limit=50)
+        latest_alert_latency = None
+        if not latest_alerts.empty and "alert_latency_ms" in latest_alerts.columns and latest_alerts["alert_latency_ms"].notna().any():
+            latest_alert_latency = float(latest_alerts["alert_latency_ms"].dropna().iloc[0])
+
+        cols = st.columns(5)
         cols[0].metric("Window count", int(live_window_count))
         cols[1].metric("Latest window", int(latest.get("window_id", 0)) if latest_window_id is not None else "n/a")
         cols[2].metric("Records", int(latest.get("records", 0)))
-        cols[3].metric("Threshold rows", int(len(live_threshold_rows)))
+        cols[3].metric("Latest alert latency", f"{latest_alert_latency:.1f} ms" if latest_alert_latency is not None else "n/a")
+        cols[4].metric("Threshold rows", int(len(live_threshold_rows)))
 
         health_cols = st.columns(4)
         health_cols[0].metric("Mean proba", f"{float(latest.get('mean_attack_probability', 0.0)):.4f}")
@@ -1395,20 +1565,57 @@ def render_live_capture(mongo_uri: str, db_name: str) -> None:
 
                 if "true_label" in thresholded.columns and thresholded["true_label"].notna().any():
                     labeled = thresholded[thresholded["true_label"].notna()].copy()
-                    metrics = evaluation_from_predictions(labeled["true_label"].astype(int), labeled["pred_proba_attack"].to_numpy(), threshold=threshold)
                     metric_cols = st.columns(5)
-                    metric_cols[0].metric("Accuracy", f"{metrics['metrics']['accuracy']:.4f}")
-                    metric_cols[1].metric("Precision", f"{metrics['metrics']['precision']:.4f}")
-                    metric_cols[2].metric("Recall", f"{metrics['metrics']['recall']:.4f}")
-                    metric_cols[3].metric("FNR", f"{metrics['metrics']['fnr']:.4f}")
-                    metric_cols[4].metric("ROC-AUC", f"{metrics['metrics']['roc_auc']:.4f}")
+                    if labeled["true_label"].nunique() > 1:
+                        metrics = evaluation_from_predictions(labeled["true_label"].astype(int), labeled["pred_proba_attack"].to_numpy(), threshold=threshold)
+                        metric_cols[0].metric("PR-AUC", f"{metrics['metrics']['pr_auc']:.4f}")
+                        metric_cols[1].metric("Precision", f"{metrics['metrics']['precision']:.4f}")
+                        metric_cols[2].metric("Recall", f"{metrics['metrics']['recall']:.4f}")
+                        metric_cols[3].metric("FNR", f"{metrics['metrics']['fnr']:.4f}")
+                        metric_cols[4].metric("ROC-AUC", f"{metrics['metrics']['roc_auc']:.4f}")
+                    else:
+                        metric_cols[0].metric("PR-AUC", "n/a")
+                        metric_cols[1].metric("Precision", "n/a")
+                        metric_cols[2].metric("Recall", "n/a")
+                        metric_cols[3].metric("FNR", "n/a")
+                        metric_cols[4].metric("ROC-AUC", "n/a")
+                        st.caption("The latest labeled window contains only one class, so PR-AUC/ROC-AUC are not defined for that window.")
                 else:
                     metric_cols = st.columns(5)
-                    metric_cols[0].metric("Accuracy", "n/a")
+                    metric_cols[0].metric("PR-AUC", "n/a")
                     metric_cols[1].metric("Precision", "n/a")
                     metric_cols[2].metric("Recall", "n/a")
                     metric_cols[3].metric("FNR", "n/a")
                     metric_cols[4].metric("ROC-AUC", "n/a")
+                    st.caption(
+                        "These evaluation metrics require ground-truth labels. Raw live capture is unlabeled, "
+                        "so use labeled injected PCAP windows for PR-AUC, precision, recall, FNR, and ROC-AUC."
+                    )
+                    recent_labeled = load_live_prediction_frame(
+                        mongo_uri,
+                        db_name,
+                        kind=LIVE_PREDICTION_KIND,
+                        source=None,
+                        window_id=None,
+                        limit=5000,
+                    )
+                    if not recent_labeled.empty and "true_label" in recent_labeled.columns and recent_labeled["true_label"].notna().any():
+                        recent_labeled = recent_labeled[recent_labeled["true_label"].notna()].copy()
+                        if recent_labeled["true_label"].nunique() > 1:
+                            recent_metrics = evaluation_from_predictions(
+                                recent_labeled["true_label"].astype(int),
+                                recent_labeled["pred_proba_attack"].to_numpy(),
+                                threshold=threshold,
+                            )
+                            with st.expander("Latest labeled PCAP metrics", expanded=True):
+                                labeled_cols = st.columns(5)
+                                labeled_cols[0].metric("PR-AUC", f"{recent_metrics['metrics']['pr_auc']:.4f}")
+                                labeled_cols[1].metric("Precision", f"{recent_metrics['metrics']['precision']:.4f}")
+                                labeled_cols[2].metric("Recall", f"{recent_metrics['metrics']['recall']:.4f}")
+                                labeled_cols[3].metric("FNR", f"{recent_metrics['metrics']['fnr']:.4f}")
+                                labeled_cols[4].metric("ROC-AUC", f"{recent_metrics['metrics']['roc_auc']:.4f}")
+                        else:
+                            st.caption("Recent labeled PCAP rows contain only one class, so ROC-AUC/PR-AUC are not defined for that subset.")
 
                 fig = go.Figure()
                 fig.add_trace(go.Scatter(x=thresholded["record_index"], y=thresholded["pred_proba_attack"], mode="lines", name="Attack probability"))
@@ -1525,9 +1732,9 @@ def render_connection_banner(mongo_uri: str, db_name: str) -> bool:
 
 
 def main() -> None:
-    st.set_page_config(page_title="BigDataFinalPaper Dashboard", layout="wide")
-    st.title("BigDataFinalPaper Dashboard")
-    st.caption("MongoDB-backed view of the offline Edge-IIoT pipeline.")
+    st.set_page_config(page_title="Edge-IIoT IDS Dashboard", layout="wide")
+    st.title("Edge-IIoT IDS Dashboard")
+    st.caption("MongoDB-backed view of binary detection, attack-subtype attribution, SHAP explanations, drift, retraining, robustness, and live PCAP verification.")
 
     mongo_uri = st.sidebar.text_input("MongoDB URI", value=DEFAULT_MONGO_URI)
     db_name = st.sidebar.text_input("Database name", value=DEFAULT_MONGO_DB)
@@ -1540,6 +1747,8 @@ def main() -> None:
     render_live_capture(mongo_uri, db_name)
     st.divider()
     render_overview(mongo_uri, db_name, db_connected)
+    st.divider()
+    render_model_artifacts(mongo_uri, db_name)
     st.divider()
     render_predictions(mongo_uri, db_name)
     st.divider()

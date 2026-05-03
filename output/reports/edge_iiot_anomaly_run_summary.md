@@ -9,7 +9,6 @@
 - Dense fallback used: False
 
 ## Holdout Metrics
-- Accuracy: 0.8370
 - ROC-AUC: 0.5240
 - PR-AUC: 0.8384
 - Attack precision: 0.8497

@@ -5,10 +5,6 @@
   "smote_training_only": true,
   "strategy": "stratified_kfold_with_fold_local_smote",
   "metric_summary": {
-    "accuracy": {
-      "mean": 0.9752334609943357,
-      "std": 0.0011813615857606337
-    },
     "roc_auc": {
       "mean": 0.9924934594992353,
       "std": 0.00033967950023400077
@@ -31,7 +27,6 @@
     }
   },
   "overall_oof_metrics": {
-    "accuracy": 0.9752334603085625,
     "roc_auc": 0.9924861386878537,
     "pr_auc": 0.9985930416615287,
     "attack_precision": 0.9717596899792684,

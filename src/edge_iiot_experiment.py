@@ -14,7 +14,6 @@ from scipy import sparse as scipy_sparse
 from sklearn.compose import ColumnTransformer
 from sklearn.impute import SimpleImputer
 from sklearn.metrics import (
-    accuracy_score,
     average_precision_score,
     classification_report,
     confusion_matrix,
@@ -75,11 +74,12 @@ CV_METRIC_COLUMNS = [
     "train_positive",
     "train_negative",
     "resampled_rows",
-    "accuracy",
     "roc_auc",
     "pr_auc",
     "attack_precision",
     "attack_recall",
+    "normal_recall",
+    "macro_recall",
     "attack_fnr",
     "tn",
     "fp",
@@ -330,13 +330,19 @@ def evaluation_from_predictions(y_true: pd.Series, pred_proba: np.ndarray, *, th
         output_dict=True,
         zero_division=0,
     )
+    per_class_report = {name: values for name, values in per_class_report.items() if isinstance(values, dict)}
 
     metrics = {
-        "accuracy": float(accuracy_score(y_true, pred_label)),
         "roc_auc": float(roc_auc_score(y_true, pred_proba)),
         "pr_auc": float(average_precision_score(y_true, pred_proba)),
         "precision": float(tp / (tp + fp)) if tp + fp else 0.0,
         "recall": float(tp / (tp + fn)) if tp + fn else 0.0,
+        "attack_recall": float(tp / (tp + fn)) if tp + fn else 0.0,
+        "normal_recall": float(tn / (tn + fp)) if tn + fp else 0.0,
+        "macro_recall": float(
+            ((tn / (tn + fp)) if tn + fp else 0.0) + ((tp / (tp + fn)) if tp + fn else 0.0)
+        )
+        / 2.0,
         "fnr": float(fn / (fn + tp)) if fn + tp else 0.0,
         "tn": int(tn),
         "fp": int(fp),
@@ -435,11 +441,12 @@ def run_smote_cross_validation(
                 "train_positive": int((y_train == 1).sum()),
                 "train_negative": int((y_train == 0).sum()),
                 "resampled_rows": int(len(y_resampled)),
-                "accuracy": float(metrics["accuracy"]),
                 "roc_auc": float(metrics["roc_auc"]),
                 "pr_auc": float(metrics["pr_auc"]),
                 "attack_precision": float(metrics["precision"]),
                 "attack_recall": float(metrics["recall"]),
+                "normal_recall": float(metrics["normal_recall"]),
+                "macro_recall": float(metrics["macro_recall"]),
                 "attack_fnr": float(metrics["fnr"]),
                 "tn": int(cm[0, 0]),
                 "fp": int(cm[0, 1]),
@@ -471,11 +478,12 @@ def run_smote_cross_validation(
 
     metric_summary = {}
     for column in [
-        "accuracy",
         "roc_auc",
         "pr_auc",
         "attack_precision",
         "attack_recall",
+        "normal_recall",
+        "macro_recall",
         "attack_fnr",
     ]:
         metric_summary[column] = {
@@ -491,11 +499,12 @@ def run_smote_cross_validation(
         "strategy": "stratified_kfold_with_fold_local_smote",
         "metric_summary": metric_summary,
         "overall_oof_metrics": {
-            "accuracy": float(overall_eval["metrics"]["accuracy"]),
             "roc_auc": float(overall_eval["metrics"]["roc_auc"]),
             "pr_auc": float(overall_eval["metrics"]["pr_auc"]),
             "attack_precision": float(overall_eval["metrics"]["precision"]),
             "attack_recall": float(overall_eval["metrics"]["recall"]),
+            "normal_recall": float(overall_eval["metrics"]["normal_recall"]),
+            "macro_recall": float(overall_eval["metrics"]["macro_recall"]),
             "attack_fnr": float(overall_eval["metrics"]["fnr"]),
         },
         "aggregate_confusion_matrix": overall_cm.tolist(),
@@ -677,6 +686,10 @@ def fit_bundle(
     final_fit_seconds = time.perf_counter() - final_fit_started
 
     transformed_feature_names = get_transformed_feature_names(final_preprocessor)
+    try:
+        final_model.feature_names_ = list(transformed_feature_names)
+    except Exception:
+        pass
     importance = pd.DataFrame(
         {
             "feature": transformed_feature_names[: len(final_model.feature_importances_)],
@@ -702,11 +715,12 @@ def fit_bundle(
     }
 
     print("\nHoldout evaluation:")
-    print(f"Accuracy   : {metrics['accuracy']:.4f}")
     print(f"ROC-AUC    : {metrics['roc_auc']:.4f}")
     print(f"PR-AUC     : {metrics['pr_auc']:.4f}")
     print(f"Attack P   : {metrics['precision']:.4f}")
     print(f"Attack R   : {metrics['recall']:.4f}")
+    print(f"Normal R   : {metrics['normal_recall']:.4f}")
+    print(f"Macro R    : {metrics['macro_recall']:.4f}")
     print(f"Attack FNR : {metrics['fnr']:.4f}")
     print("Confusion matrix [ [TN, FP], [FN, TP] ]")
     print(cm)
@@ -830,6 +844,7 @@ def save_binary_artifacts(
             "runtime": bundle["runtime"],
             "feature_contract": bundle.get("feature_contract"),
             "model_version": bundle.get("model_version"),
+            "transformed_feature_names": list(get_transformed_feature_names(bundle["preprocessor"])),
         },
         model_path,
     )
@@ -1204,7 +1219,7 @@ def ablation_command(args: argparse.Namespace) -> None:
         if path.exists():
             with path.open("r", encoding="utf-8") as fh:
                 payload = json.load(fh)
-            add_row(name, payload, ["accuracy", "pr_auc", "macro_f1", "attack_recall", "attack_fnr"])
+            add_row(name, payload, ["pr_auc", "macro_recall", "attack_recall", "normal_recall", "attack_fnr"])
 
     if args.robustness_report and Path(args.robustness_report).exists():
         with Path(args.robustness_report).open("r", encoding="utf-8") as fh:
