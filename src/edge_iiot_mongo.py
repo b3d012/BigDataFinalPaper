@@ -20,9 +20,13 @@ DEFAULT_MONGO_DB = os.getenv("MONGODB_DB", "edge_iiot_paper")
 RAW_PACKETS_COLLECTION = "raw_packets"
 FEATURE_VECTORS_COLLECTION = "feature_vectors"
 PREDICTIONS_COLLECTION = "predictions"
+ALERT_EXPLANATIONS_COLLECTION = "alert_explanations"
 LIVE_WINDOWS_COLLECTION = "live_windows"
 FEATURE_IMPORTANCE_COLLECTION = "feature_importance"
 THRESHOLD_METRICS_COLLECTION = "threshold_metrics"
+DRIFT_EVENTS_COLLECTION = "drift_events"
+RETRAIN_EVENTS_COLLECTION = "retrain_events"
+ADVERSARIAL_EVALUATIONS_COLLECTION = "adversarial_evaluations"
 ANALYSIS_SUMMARIES_COLLECTION = "analysis_summaries"
 
 
@@ -65,9 +69,13 @@ def ensure_indexes(db) -> None:
     db[FEATURE_VECTORS_COLLECTION].create_index([("kind", ASCENDING), ("source_file", ASCENDING), ("record_index", ASCENDING)])
     db[PREDICTIONS_COLLECTION].create_index([("kind", ASCENDING), ("source", ASCENDING), ("source_file", ASCENDING), ("record_index", ASCENDING)])
     db[PREDICTIONS_COLLECTION].create_index([("kind", ASCENDING), ("source", ASCENDING), ("created_at", ASCENDING)])
+    db[ALERT_EXPLANATIONS_COLLECTION].create_index([("kind", ASCENDING), ("source", ASCENDING), ("source_file", ASCENDING), ("record_index", ASCENDING)])
     db[LIVE_WINDOWS_COLLECTION].create_index([("window_id", ASCENDING), ("source", ASCENDING), ("created_at", ASCENDING)])
     db[FEATURE_IMPORTANCE_COLLECTION].create_index([("importance_type", ASCENDING), ("feature", ASCENDING)])
     db[THRESHOLD_METRICS_COLLECTION].create_index([("kind", ASCENDING), ("source", ASCENDING), ("threshold", ASCENDING)])
+    db[DRIFT_EVENTS_COLLECTION].create_index([("kind", ASCENDING), ("source", ASCENDING), ("window_id", ASCENDING), ("created_at", ASCENDING)])
+    db[RETRAIN_EVENTS_COLLECTION].create_index([("kind", ASCENDING), ("source", ASCENDING), ("created_at", ASCENDING)])
+    db[ADVERSARIAL_EVALUATIONS_COLLECTION].create_index([("kind", ASCENDING), ("source", ASCENDING), ("created_at", ASCENDING)])
     db[ANALYSIS_SUMMARIES_COLLECTION].create_index([("kind", ASCENDING), ("artifact_path", ASCENDING)])
     db[ANALYSIS_SUMMARIES_COLLECTION].create_index([("kind", ASCENDING), ("created_at", ASCENDING)])
 
@@ -243,8 +251,12 @@ def seed_offline_artifacts(db, repo_root: Path = REPO_ROOT) -> dict[str, int]:
         "raw_packets": demo_counts["raw_packets"],
         "feature_vectors": demo_counts["feature_vectors"],
         "predictions": 0,
+        "alert_explanations": 0,
         "feature_importance": 0,
         "threshold_metrics": 0,
+        "drift_events": 0,
+        "retrain_events": 0,
+        "adversarial_evaluations": 0,
         "analysis_summaries": 0,
     }
 
@@ -258,6 +270,13 @@ def seed_offline_artifacts(db, repo_root: Path = REPO_ROOT) -> dict[str, int]:
     for path, source, kind, threshold in prediction_specs:
         if path.exists():
             counts["predictions"] += seed_prediction_csv(db, path, source=source, kind=kind, threshold=threshold)
+
+    alert_specs = [
+        (report_dir / "edge_iiot_shap_local_examples.csv", "shap_local", "classifier"),
+    ]
+    for path, kind, source in alert_specs:
+        if path.exists():
+            counts["alert_explanations"] += seed_feature_importance_csv(db, path, importance_type=kind, source=source)
 
     feature_specs = [
         (repo_root / "models" / "edge_iiot_xgb_model.feature_importance.csv", "model_feature_importance", "classifier"),
@@ -279,12 +298,16 @@ def seed_offline_artifacts(db, repo_root: Path = REPO_ROOT) -> dict[str, int]:
     summary_specs = [
         (report_dir / "edge_iiot_holdout_metrics.json", "holdout_metrics"),
         (report_dir / "edge_iiot_cv_summary.json", "cv_summary"),
+        (report_dir / "edge_iiot_multiclass_summary.json", "multiclass_summary"),
         (report_dir / "edge_iiot_shap_summary.json", "shap_summary"),
         (report_dir / "edge_iiot_anomaly_holdout_metrics.json", "anomaly_holdout_metrics"),
         (report_dir / "edge_iiot_drift_summary.json", "drift_summary"),
         (report_dir / "edge_iiot_retrain_trigger.json", "retrain_trigger"),
         (report_dir / "edge_iiot_retrain_comparison.json", "retrain_comparison"),
+        (report_dir / "edge_iiot_adversarial_robustness.json", "adversarial_robustness"),
         (demo_dir / "edge_iiot_demo_drift_summary.json", "demo_drift_summary"),
+        (repo_root / "models" / "edge_iiot_feature_contract.json", "feature_contract"),
+        (repo_root / "models" / "edge_iiot_active_model.json", "active_model_pointer"),
     ]
     for path, kind in summary_specs:
         if path.exists():
@@ -301,6 +324,22 @@ def seed_offline_artifacts(db, repo_root: Path = REPO_ROOT) -> dict[str, int]:
         if path.exists():
             counts["analysis_summaries"] += seed_summary_document(db, path, kind=kind)
 
+    adversarial_path = report_dir / "edge_iiot_adversarial_robustness.json"
+    if adversarial_path.exists():
+        payload = read_json(adversarial_path)
+        record = {
+            "kind": "adversarial_robustness",
+            "source": "offline",
+            "artifact_path": str(adversarial_path),
+            "created_at": utc_now(),
+            "payload": payload,
+        }
+        counts["adversarial_evaluations"] += upsert_documents(
+            db[ADVERSARIAL_EVALUATIONS_COLLECTION],
+            [record],
+            ["kind", "artifact_path"],
+        )
+
     return counts
 
 
@@ -309,9 +348,13 @@ def collection_counts(db) -> dict[str, int]:
         RAW_PACKETS_COLLECTION: db[RAW_PACKETS_COLLECTION].count_documents({}),
         FEATURE_VECTORS_COLLECTION: db[FEATURE_VECTORS_COLLECTION].count_documents({}),
         PREDICTIONS_COLLECTION: db[PREDICTIONS_COLLECTION].count_documents({}),
+        ALERT_EXPLANATIONS_COLLECTION: db[ALERT_EXPLANATIONS_COLLECTION].count_documents({}),
         LIVE_WINDOWS_COLLECTION: db[LIVE_WINDOWS_COLLECTION].count_documents({}),
         FEATURE_IMPORTANCE_COLLECTION: db[FEATURE_IMPORTANCE_COLLECTION].count_documents({}),
         THRESHOLD_METRICS_COLLECTION: db[THRESHOLD_METRICS_COLLECTION].count_documents({}),
+        DRIFT_EVENTS_COLLECTION: db[DRIFT_EVENTS_COLLECTION].count_documents({}),
+        RETRAIN_EVENTS_COLLECTION: db[RETRAIN_EVENTS_COLLECTION].count_documents({}),
+        ADVERSARIAL_EVALUATIONS_COLLECTION: db[ADVERSARIAL_EVALUATIONS_COLLECTION].count_documents({}),
         ANALYSIS_SUMMARIES_COLLECTION: db[ANALYSIS_SUMMARIES_COLLECTION].count_documents({}),
     }
 
@@ -323,9 +366,13 @@ def clear_live_collections(db) -> dict[str, int]:
         RAW_PACKETS_COLLECTION: db[RAW_PACKETS_COLLECTION].delete_many(live_query).deleted_count,
         FEATURE_VECTORS_COLLECTION: db[FEATURE_VECTORS_COLLECTION].delete_many(live_query).deleted_count,
         PREDICTIONS_COLLECTION: db[PREDICTIONS_COLLECTION].delete_many(live_query).deleted_count,
+        ALERT_EXPLANATIONS_COLLECTION: db[ALERT_EXPLANATIONS_COLLECTION].delete_many(live_query).deleted_count,
         LIVE_WINDOWS_COLLECTION: db[LIVE_WINDOWS_COLLECTION].delete_many(live_query).deleted_count,
         FEATURE_IMPORTANCE_COLLECTION: db[FEATURE_IMPORTANCE_COLLECTION].delete_many(live_query).deleted_count,
         THRESHOLD_METRICS_COLLECTION: db[THRESHOLD_METRICS_COLLECTION].delete_many({"source": "live"}).deleted_count,
+        DRIFT_EVENTS_COLLECTION: db[DRIFT_EVENTS_COLLECTION].delete_many(live_query).deleted_count,
+        RETRAIN_EVENTS_COLLECTION: db[RETRAIN_EVENTS_COLLECTION].delete_many(live_query).deleted_count,
+        ADVERSARIAL_EVALUATIONS_COLLECTION: db[ADVERSARIAL_EVALUATIONS_COLLECTION].delete_many(live_query).deleted_count,
         ANALYSIS_SUMMARIES_COLLECTION: db[ANALYSIS_SUMMARIES_COLLECTION].delete_many(live_query).deleted_count,
         "analysis_summaries_live_thresholds": db[ANALYSIS_SUMMARIES_COLLECTION].delete_many({"source": "live"}).deleted_count,
     }

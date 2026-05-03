@@ -4,6 +4,27 @@
 # Keep folders explorable
 !*/
 
+# Keep top-level and nested source/docs/tests/schema files
+!src/
+!src/**/*.py
+!docs/
+!docs/**/*.md
+!tests/
+!tests/**/*.py
+!schemas/
+!schemas/**/*.json
+!models/
+!models/*.json
+!output/
+!output/reports/
+!output/reports/*.json
+!output/reports/*.md
+!output/demo/
+!output/demo/*.json
+!output/demo/*.md
+!output/live/
+!output/live/*.json
+
 # Keep Python source
 !*.py
 
@@ -22,3 +43,8 @@
 
 # Keep gitignore itself
 !.gitignore
+
+# Keep repository docs and root config files
+!README.md
+!*.md
+!*.txt

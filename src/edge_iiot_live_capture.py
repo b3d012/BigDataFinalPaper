@@ -6,6 +6,7 @@ import os
 import subprocess
 import time
 import threading
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -16,19 +17,26 @@ import xgboost as xgb
 
 from edge_iiot_demo_replay import (
     available_tshark_fields,
+    available_tshark_interfaces,
     bundle_field_contract,
     find_tshark,
     prepare_model_input,
     resolve_supported_fields,
-    score_pcap_csv,
+    validate_tshark_interface,
 )
+from edge_iiot_adwin import ADWINMonitor
 from edge_iiot_thresholds import build_threshold_grid, compute_threshold_metrics, select_recommendations
 from edge_iiot_experiment import DEFAULT_EDGE_CSV, get_transformed_feature_names
+from edge_iiot_runtime import DEFAULT_ACTIVE_MODEL_POINTER_PATH, load_active_model_pointer, json_safe, resolve_model_path
 from edge_iiot_drift import compare_batches, load_dataset_batches
 from edge_iiot_mongo import (
     ANALYSIS_SUMMARIES_COLLECTION,
+    ALERT_EXPLANATIONS_COLLECTION,
+    ADVERSARIAL_EVALUATIONS_COLLECTION,
+    DRIFT_EVENTS_COLLECTION,
     FEATURE_IMPORTANCE_COLLECTION,
     LIVE_WINDOWS_COLLECTION,
+    RETRAIN_EVENTS_COLLECTION,
     PREDICTIONS_COLLECTION,
     RAW_PACKETS_COLLECTION,
     FEATURE_VECTORS_COLLECTION,
@@ -49,9 +57,13 @@ DEFAULT_CAPTURE_DIR = DEFAULT_OUTPUT_DIR / "captures"
 DEFAULT_INJECTION_DIR = DEFAULT_OUTPUT_DIR / "inbox"
 DEFAULT_PROCESSED_DIR = DEFAULT_OUTPUT_DIR / "processed"
 DEFAULT_STATUS_PATH = DEFAULT_OUTPUT_DIR / "live_capture_status.json"
+DEFAULT_MODEL_POINTER_PATH = DEFAULT_ACTIVE_MODEL_POINTER_PATH
 DEFAULT_ANOMALY_MODEL_PATH = REPO_ROOT / "models" / "edge_iiot_isolation_forest.joblib"
 DEFAULT_DRIFT_N_BINS = 10
 DEFAULT_DRIFT_MIN_CATEGORY_COUNT = 5
+DEFAULT_ADWIN_DELTA = 0.002
+DEFAULT_ADWIN_MIN_WINDOW = 20
+DEFAULT_ADWIN_MAX_WINDOW = 4096
 DEFAULT_METADATA_FIELDS = [
     "frame.time",
     "ip.src_host",
@@ -174,10 +186,59 @@ def infer_binary_label_from_name(name: str | None) -> int | None:
     return None
 
 
+def infer_attack_label_from_name(name: str | None) -> str | None:
+    if not name:
+        return None
+    text = str(name).strip()
+    if not text:
+        return None
+    lowered = text.lower()
+    if any(token in lowered for token in ("normal", "benign", "noattack", "no_attack", "baseline")):
+        return "Normal"
+    return Path(text).stem.replace("_", " ").replace("-", " ").strip() or None
+
+
+def validate_capture_interface(tshark: str, interface: str) -> tuple[bool, str]:
+    return validate_tshark_interface(tshark, interface)
+
+
 def load_bundle(model_path: Path) -> dict[str, object]:
-    if not model_path.exists():
-        raise FileNotFoundError(f"Model bundle not found: {model_path}")
-    bundle = joblib.load(model_path)
+    resolved_path = model_path
+    if not resolved_path.exists():
+        if resolved_path.suffix.lower() == ".json":
+            fallback_joblib = resolved_path.with_name("edge_iiot_xgb_model.joblib")
+            if fallback_joblib.exists():
+                resolved_path = fallback_joblib
+        if not resolved_path.exists():
+            raise FileNotFoundError(f"Model bundle not found: {model_path}")
+    if resolved_path.suffix.lower() == ".json":
+        pointer = load_active_model_pointer(resolved_path)
+        if not pointer:
+            fallback_joblib = resolved_path.with_name("edge_iiot_xgb_model.joblib")
+            if fallback_joblib.exists():
+                resolved_path = fallback_joblib
+            else:
+                raise ValueError(f"Model pointer is missing or invalid: {resolved_path}")
+        if resolved_path.suffix.lower() != ".json":
+            return load_bundle(resolved_path)
+        binary_bundle = joblib.load(resolve_model_path(resolved_path, "binary_model_path"))
+        required = {"model", "preprocessor", "threshold", "training_meta"}
+        missing = required - set(binary_bundle.keys())
+        if missing:
+            raise ValueError(f"Binary model bundle is missing required keys: {sorted(missing)}")
+        binary_bundle = dict(binary_bundle)
+        binary_bundle["model_version"] = pointer.get("version")
+        binary_bundle["active_pointer"] = pointer
+        attack_model_path = pointer.get("attack_model_path")
+        if attack_model_path:
+            attack_bundle = joblib.load(Path(attack_model_path))
+            if {"model", "preprocessor", "classes_"}.difference(attack_bundle.keys()):
+                raise ValueError(f"Attack model bundle is missing required keys: {attack_model_path}")
+            binary_bundle["attack_bundle"] = attack_bundle
+            binary_bundle["attack_model_version"] = attack_bundle.get("model_version")
+        return binary_bundle
+
+    bundle = joblib.load(resolved_path)
     required = {"model", "preprocessor", "threshold", "training_meta"}
     missing = required - set(bundle.keys())
     if missing:
@@ -376,6 +437,87 @@ def safe_mean_absolute_contrib(transformed, model, feature_names: list[str], sam
     ).sort_values("mean_abs_contrib", ascending=False)
 
 
+def safe_alert_contribs(
+    transformed,
+    model,
+    feature_names: list[str],
+    *,
+    sample_rows: int | None = None,
+    top_n: int = 10,
+) -> pd.DataFrame:
+    if transformed is None or transformed.shape[0] == 0:
+        return pd.DataFrame(columns=["record_index", "feature", "contribution", "abs_contribution", "rank", "base_value", "expected_value"])
+
+    if sample_rows is not None and transformed.shape[0] > sample_rows:
+        transformed = transformed[:sample_rows]
+
+    if hasattr(transformed, "toarray"):
+        matrix = transformed.toarray()
+    else:
+        matrix = np.asarray(transformed)
+
+    dmat = xgb.DMatrix(matrix, feature_names=feature_names)
+    contribs = model.get_booster().predict(dmat, pred_contribs=True)
+    if contribs.ndim != 2 or contribs.shape[1] < 2:
+        return pd.DataFrame(columns=["record_index", "feature", "contribution", "abs_contribution", "rank", "base_value", "expected_value"])
+
+    bias = contribs[:, -1]
+    contribs = contribs[:, :-1]
+    rows: list[dict[str, object]] = []
+    for record_index, row in enumerate(contribs):
+        order = np.argsort(np.abs(row))[::-1][:top_n]
+        for rank, feature_index in enumerate(order, start=1):
+            rows.append(
+                {
+                    "record_index": int(record_index),
+                    "feature": feature_names[int(feature_index)],
+                    "contribution": float(row[int(feature_index)]),
+                    "abs_contribution": float(abs(row[int(feature_index)])),
+                    "rank": int(rank),
+                    "base_value": float(bias[int(record_index)]),
+                    "expected_value": float(bias[int(record_index)]),
+                }
+            )
+    return pd.DataFrame(rows)
+
+
+def score_model_frame(
+    *,
+    raw_df: pd.DataFrame,
+    bundle: dict[str, object],
+    threshold: float,
+    attack_threshold: float | None = None,
+) -> tuple[pd.DataFrame, np.ndarray, np.ndarray, np.ndarray | None, np.ndarray | None, pd.DataFrame, pd.DataFrame]:
+    X = prepare_window_frame(raw_df, bundle)
+    transformed = bundle["preprocessor"].transform(X)
+    model = bundle["model"]
+    proba = model.predict_proba(transformed)[:, 1]
+    pred = (proba >= threshold).astype(int)
+
+    attack_proba: np.ndarray | None = None
+    attack_pred: np.ndarray | None = None
+    attack_bundle = bundle.get("attack_bundle")
+    if attack_bundle is not None:
+        attack_transformed = attack_bundle["preprocessor"].transform(X)
+        attack_proba_matrix = attack_bundle["model"].predict_proba(attack_transformed)
+        attack_pred = np.argmax(attack_proba_matrix, axis=1)
+        attack_proba = attack_proba_matrix.max(axis=1)
+
+    feature_names = get_transformed_feature_names(bundle["preprocessor"])
+    shap_df = safe_mean_absolute_contrib(
+        transformed,
+        bundle["model"],
+        feature_names,
+    )
+    alert_df = safe_alert_contribs(
+        transformed,
+        bundle["model"],
+        feature_names,
+        top_n=10,
+    )
+    return X, proba, pred, attack_proba, attack_pred, shap_df, alert_df
+
+
 def score_anomaly_window(
     *,
     raw_df: pd.DataFrame,
@@ -424,6 +566,200 @@ def score_anomaly_window(
 
     anomaly_frame = pd.DataFrame(docs)
     return scores, pred, anomaly_frame
+
+
+def classify_attack_labels(attack_bundle: dict[str, object] | None, raw_df: pd.DataFrame) -> tuple[np.ndarray | None, np.ndarray | None]:
+    if attack_bundle is None or raw_df.empty:
+        return None, None
+    X = prepare_window_frame(raw_df, attack_bundle)
+    transformed = attack_bundle["preprocessor"].transform(X)
+    proba_matrix = attack_bundle["model"].predict_proba(transformed)
+    pred_idx = np.argmax(proba_matrix, axis=1)
+    return proba_matrix.max(axis=1), pred_idx
+
+
+def attack_class_name(attack_bundle: dict[str, object] | None, index: int | None) -> str | None:
+    if index is None:
+        return None
+    if attack_bundle and "classes_" in attack_bundle:
+        classes = list(attack_bundle["classes_"])
+        if 0 <= int(index) < len(classes):
+            return str(classes[int(index)])
+    return str(index)
+
+
+def assemble_alert_documents(
+    *,
+    window_id: int,
+    interface: str,
+    source_file_tag: str,
+    capture_mode: str,
+    raw_csv: Path,
+    raw_df: pd.DataFrame,
+    pred: np.ndarray,
+    proba: np.ndarray,
+    attack_proba: np.ndarray | None,
+    attack_pred: np.ndarray | None,
+    bundle: dict[str, object],
+    alert_df: pd.DataFrame,
+    threshold: float,
+    true_label: int | None,
+) -> list[dict[str, object]]:
+    if alert_df.empty:
+        return []
+
+    model_version = str(bundle.get("model_version") or bundle.get("active_pointer", {}).get("version") or "binary")
+    attack_model_version = str(bundle.get("attack_model_version") or bundle.get("active_pointer", {}).get("version") or model_version)
+    rows: list[dict[str, object]] = []
+    grouped = alert_df.sort_values(["record_index", "rank"]).groupby("record_index", sort=True)
+    for record_index, group in grouped:
+        record = raw_df.reset_index(drop=True).iloc[int(record_index)].to_dict() if int(record_index) < len(raw_df) else {}
+        pred_label = int(pred[int(record_index)]) if int(record_index) < len(pred) else None
+        attack_label_name = None
+        attack_label_score = None
+        if attack_pred is not None and int(record_index) < len(attack_pred):
+            attack_label_name = attack_class_name(bundle.get("attack_bundle"), int(attack_pred[int(record_index)]))
+        if attack_proba is not None and int(record_index) < len(attack_proba):
+            attack_label_score = float(attack_proba[int(record_index)])
+        top_features = [
+            {
+                "feature": row["feature"],
+                "contribution": float(row["contribution"]),
+                "abs_contribution": float(row["abs_contribution"]),
+                "rank": int(row["rank"]),
+            }
+            for _, row in group.sort_values("rank").head(10).iterrows()
+        ]
+        rows.append(
+            {
+                "kind": "live_alert_explanation",
+                "source": interface,
+                "source_file": source_file_tag,
+                "window_id": window_id,
+                "record_index": int(record_index),
+                "created_at": utc_now(),
+                "prediction_id": f"{window_id}:{int(record_index)}",
+                "prediction_kind": "live_prediction",
+                "capture_mode": capture_mode,
+                "model_version": model_version,
+                "attack_model_version": attack_model_version,
+                "threshold": float(threshold),
+                "raw_csv_path": str(raw_csv),
+                "pred_label": pred_label,
+                "pred_label_name": "Attack" if pred_label == 1 else "Normal",
+                "pred_proba_attack": float(proba[int(record_index)]) if int(record_index) < len(proba) else None,
+                "attack_type_name": attack_label_name,
+                "attack_type_proba": attack_label_score,
+                "true_label": true_label,
+                "top_features": top_features,
+                "base_value": float(group.iloc[0].get("base_value", 0.0)),
+                "expected_value": float(group.iloc[0].get("expected_value", 0.0)),
+                "raw_probability": float(proba[int(record_index)]) if int(record_index) < len(proba) else None,
+                **record,
+            }
+        )
+    return rows
+
+
+def append_drift_event(
+    *,
+    db,
+    window_id: int,
+    interface: str,
+    source_file_tag: str,
+    capture_mode: str,
+    record_index: int,
+    confidence: float,
+    adwin_state: dict[str, object],
+    trigger_source: str,
+) -> dict[str, object]:
+    event = {
+        "kind": "live_drift_event",
+        "source": interface,
+        "source_file": source_file_tag,
+        "window_id": window_id,
+        "record_index": int(record_index),
+        "created_at": utc_now(),
+        "capture_mode": capture_mode,
+        "confidence": float(confidence),
+        "trigger_source": trigger_source,
+        **adwin_state,
+    }
+    insert_documents(db[DRIFT_EVENTS_COLLECTION], [event])
+    return event
+
+
+def update_adwin_monitor(
+    *,
+    adwin: ADWINMonitor,
+    scores: np.ndarray,
+    db,
+    window_id: int,
+    interface: str,
+    source_file_tag: str,
+    capture_mode: str,
+) -> tuple[dict[str, object], list[dict[str, object]]]:
+    drift_events: list[dict[str, object]] = []
+    state: dict[str, object] = {}
+    for record_index, score in enumerate(scores):
+        confidence = float(max(float(score), 1.0 - float(score)))
+        state = adwin.update(confidence)
+        if state.get("drift_detected"):
+            drift_events.append(
+                append_drift_event(
+                    db=db,
+                    window_id=window_id,
+                    interface=interface,
+                    source_file_tag=source_file_tag,
+                    capture_mode=capture_mode,
+                    record_index=record_index,
+                    confidence=confidence,
+                    adwin_state=state,
+                    trigger_source="adwin_confidence",
+                )
+            )
+    return state, drift_events
+
+
+def launch_retrain_job(
+    *,
+    retrain_script: Path,
+    classifier_bundle: Path,
+    model_pointer: Path,
+    mongo_uri: str,
+    db_name: str,
+    recent_live_rows: int,
+    report_dir: Path,
+    edge_csv: Path,
+    numeric_threshold: float,
+    min_category_count: int,
+) -> subprocess.Popen[bytes]:
+    command = [
+        sys.executable,
+        str(retrain_script),
+        "train",
+        "--classifier_bundle",
+        str(classifier_bundle),
+        "--model_out",
+        str(model_pointer.with_name("edge_iiot_xgb_model_retrained.joblib")),
+        "--report_dir",
+        str(report_dir),
+        "--edge_csv",
+        str(edge_csv),
+        "--numeric_threshold",
+        str(numeric_threshold),
+        "--min_category_count",
+        str(min_category_count),
+        "--mongo_uri",
+        mongo_uri,
+        "--db_name",
+        db_name,
+        "--recent_live_rows",
+        str(recent_live_rows),
+        "--model_pointer_path",
+        str(model_pointer),
+    ]
+    return subprocess.Popen(command, cwd=str(REPO_ROOT))
 
 
 def score_live_drift(
@@ -578,15 +914,25 @@ def score_window(
     raw_csv: Path,
     bundle: dict[str, object],
     threshold: float,
-    feature_names: list[str],
     shap_sample_rows: int,
-) -> tuple[pd.DataFrame, np.ndarray, np.ndarray, pd.DataFrame]:
-    df, proba, pred = score_pcap_csv(raw_csv, bundle, threshold=threshold)
+    shap_top_n: int,
+) -> tuple[pd.DataFrame, np.ndarray, np.ndarray, np.ndarray | None, np.ndarray | None, pd.DataFrame, pd.DataFrame]:
+    if not raw_csv.exists() or raw_csv.stat().st_size == 0:
+        empty = pd.DataFrame()
+        return empty, np.array([]), np.array([], dtype=int), None, None, empty, empty
+
+    df = pd.read_csv(raw_csv, low_memory=False)
+    df = normalize_columns(df)
     if df.empty:
-        return df, proba, pred, pd.DataFrame()
+        empty = pd.DataFrame()
+        return empty, np.array([]), np.array([], dtype=int), None, None, empty, empty
 
     X = prepare_window_frame(df, bundle)
     transformed = bundle["preprocessor"].transform(X)
+    proba = bundle["model"].predict_proba(transformed)[:, 1]
+    pred = (proba >= threshold).astype(int)
+    attack_proba, attack_pred = classify_attack_labels(bundle.get("attack_bundle"), df)
+    feature_names = get_transformed_feature_names(bundle["preprocessor"])
     shap_df = safe_mean_absolute_contrib(
         transformed,
         bundle["model"],
@@ -595,7 +941,15 @@ def score_window(
     )
     shap_df = shap_df.head(15).copy()
     shap_df["window_id"] = window_id
-    return df, proba, pred, shap_df
+    alert_df = safe_alert_contribs(
+        transformed,
+        bundle["model"],
+        feature_names,
+        sample_rows=shap_sample_rows,
+        top_n=shap_top_n,
+    )
+    alert_df["window_id"] = window_id
+    return df, proba, pred, attack_proba, attack_pred, shap_df, alert_df
 
 
 def infer_window_true_label(*, source_file_tag: str, injected_pcap_path: str | None = None) -> int | None:
@@ -618,16 +972,27 @@ def prediction_documents(
     raw_df: pd.DataFrame,
     proba: np.ndarray,
     pred: np.ndarray,
+    attack_proba: np.ndarray | None,
+    attack_pred: np.ndarray | None,
     threshold: float,
     raw_csv: Path,
     source_file_tag: str,
     capture_mode: str,
+    model_version: str | None = None,
+    attack_model_version: str | None = None,
+    attack_bundle: dict[str, object] | None = None,
     true_label: int | None = None,
 ) -> list[dict[str, object]]:
     true_label_name = "Attack" if true_label == 1 else "Normal" if true_label == 0 else None
     docs: list[dict[str, object]] = []
     for record_index, (_, row) in enumerate(raw_df.reset_index(drop=True).iterrows()):
         pred_label = int(pred[record_index])
+        attack_type_name = None
+        attack_type_proba = None
+        if attack_pred is not None and record_index < len(attack_pred):
+            attack_type_name = attack_class_name(attack_bundle, int(attack_pred[record_index]))
+        if attack_proba is not None and record_index < len(attack_proba):
+            attack_type_proba = float(attack_proba[record_index])
         payload = {
             "kind": "live_prediction",
             "source": interface,
@@ -637,9 +1002,13 @@ def prediction_documents(
             "created_at": utc_now(),
             "threshold": threshold,
             "capture_mode": capture_mode,
+            "model_version": model_version,
+            "attack_model_version": attack_model_version,
             "pred_proba_attack": float(proba[record_index]),
             "pred_label": pred_label,
             "pred_label_name": "Attack" if pred_label else "Normal",
+            "attack_type_name": attack_type_name,
+            "attack_type_proba": attack_type_proba,
             "true_label": true_label,
             "true_label_name": true_label_name,
             "correct": int(true_label == pred_label) if true_label is not None else None,
@@ -687,6 +1056,7 @@ def live_window_summary(
     df: pd.DataFrame,
     proba: np.ndarray,
     pred: np.ndarray,
+    attack_proba: np.ndarray | None,
     threshold: float,
     file_max_threshold: float,
     file_ratio_threshold: float,
@@ -696,6 +1066,9 @@ def live_window_summary(
     display_filter: str | None,
     packet_count: int | None,
     feature_importance_rows: pd.DataFrame,
+    model_version: str | None = None,
+    attack_model_version: str | None = None,
+    adwin_state: dict[str, object] | None = None,
     injected_pcap_path: str | None = None,
 ) -> dict[str, object]:
     records = int(len(df))
@@ -718,7 +1091,11 @@ def live_window_summary(
         "median_attack_probability": float(np.median(proba)) if len(proba) else 0.0,
         "p95_attack_probability": float(np.quantile(proba, 0.95)) if len(proba) else 0.0,
         "max_attack_probability": float(np.max(proba)) if len(proba) else 0.0,
+        "mean_attack_type_probability": float(np.mean(attack_proba)) if attack_proba is not None and len(attack_proba) else None,
         "threshold": threshold,
+        "model_version": model_version,
+        "attack_model_version": attack_model_version,
+        "adwin_state": adwin_state or {},
         "file_max_threshold": file_max_threshold,
         "file_ratio_threshold": file_ratio_threshold,
         "window_pred_label": int(
@@ -749,6 +1126,8 @@ def score_and_store_window(
     df: pd.DataFrame,
     proba: np.ndarray,
     pred: np.ndarray,
+    attack_proba: np.ndarray | None,
+    attack_pred: np.ndarray | None,
     threshold: float,
     fields: list[str],
     unsupported_fields: list[str],
@@ -765,6 +1144,7 @@ def score_and_store_window(
     display_filter: str | None,
     packet_count: int | None,
     shap_df: pd.DataFrame,
+    alert_df: pd.DataFrame,
     anomaly_bundle: dict[str, object] | None,
     drift_reference_raw: pd.DataFrame | None,
     drift_n_bins: int,
@@ -772,6 +1152,9 @@ def score_and_store_window(
     numeric_threshold: float,
     tshark_timeout_seconds: int | None = None,
     injected_pcap_path: str | None = None,
+    model_version: str | None = None,
+    attack_model_version: str | None = None,
+    adwin_state: dict[str, object] | None = None,
 ) -> dict[str, object]:
     window_true_label = infer_window_true_label(source_file_tag=source_file_tag, injected_pcap_path=injected_pcap_path)
     raw_docs = packet_documents(
@@ -799,10 +1182,15 @@ def score_and_store_window(
         raw_df=df,
         proba=proba,
         pred=pred,
+        attack_proba=attack_proba,
+        attack_pred=attack_pred,
         threshold=threshold,
         raw_csv=raw_csv,
         source_file_tag=source_file_tag,
         capture_mode=capture_mode,
+        model_version=model_version,
+        attack_model_version=attack_model_version,
+        attack_bundle=bundle.get("attack_bundle"),
         true_label=window_true_label,
     )
     for doc in prediction_docs:
@@ -810,6 +1198,25 @@ def score_and_store_window(
     insert_documents(db[RAW_PACKETS_COLLECTION], raw_docs)
     insert_documents(db[FEATURE_VECTORS_COLLECTION], feature_docs)
     insert_documents(db[PREDICTIONS_COLLECTION], prediction_docs)
+    if not shap_df.empty:
+        alert_docs = assemble_alert_documents(
+            window_id=window_id,
+            interface=interface,
+            source_file_tag=source_file_tag,
+            capture_mode=capture_mode,
+            raw_csv=raw_csv,
+            raw_df=df,
+            pred=pred,
+            proba=proba,
+            attack_proba=attack_proba,
+            attack_pred=attack_pred,
+            bundle=bundle,
+            alert_df=alert_df,
+            threshold=threshold,
+            true_label=window_true_label,
+        )
+        if alert_docs:
+            insert_documents(db[ALERT_EXPLANATIONS_COLLECTION], alert_docs)
     if not shap_df.empty:
         live_shap_docs = shap_df.copy()
         live_shap_docs["importance_type"] = "live_shap"
@@ -830,6 +1237,7 @@ def score_and_store_window(
         df=df,
         proba=proba,
         pred=pred,
+        attack_proba=attack_proba,
         threshold=threshold,
         file_max_threshold=file_max_threshold,
         file_ratio_threshold=file_ratio_threshold,
@@ -839,6 +1247,9 @@ def score_and_store_window(
         display_filter=display_filter,
         packet_count=packet_count,
         feature_importance_rows=shap_df,
+        model_version=model_version,
+        attack_model_version=attack_model_version,
+        adwin_state=adwin_state,
         injected_pcap_path=injected_pcap_path,
     )
     upsert_documents(db[LIVE_WINDOWS_COLLECTION], [summary], ["kind", "source_file", "window_id"])
@@ -904,9 +1315,11 @@ def process_injection_queue(
     db,
     status_path: Path,
     base_status: dict[str, object],
-    bundle: dict[str, object],
+    bundle_path: Path,
     anomaly_bundle: dict[str, object] | None,
     drift_reference_raw: pd.DataFrame | None,
+    adwin: ADWINMonitor,
+    trigger_retrain,
     tshark: str,
     injection_dir: Path,
     processed_dir: Path,
@@ -920,7 +1333,6 @@ def process_injection_queue(
     min_records: int,
     display_filter: str | None,
     packet_count: int | None,
-    feature_names: list[str],
     shap_sample_rows: int,
     shap_top_n: int,
     drift_n_bins: int,
@@ -928,6 +1340,8 @@ def process_injection_queue(
     numeric_threshold: float,
     tshark_timeout_seconds: int | None,
     window_id: int,
+    model_version: str | None,
+    attack_model_version: str | None,
 ) -> int:
     processed = 0
     for pcap_path in injection_pcap_files(injection_dir):
@@ -936,6 +1350,9 @@ def process_injection_queue(
         source_file_tag = f"{live_window_tag(window_id)}_{pcap_path.stem}"
         raw_csv = capture_dir / f"{source_file_tag}.csv"
         start_time = utc_now()
+        bundle = load_bundle(bundle_path)
+        model_version = str(bundle.get("model_version") or bundle.get("active_pointer", {}).get("version") or model_version or "binary")
+        attack_model_version = str(bundle.get("attack_model_version") or bundle.get("active_pointer", {}).get("version") or attack_model_version or "binary")
         _, unsupported_fields = run_pcap_to_csv(
             tshark=tshark,
             input_pcap=pcap_path,
@@ -946,14 +1363,29 @@ def process_injection_queue(
             packet_count=packet_count,
             timeout_seconds=tshark_timeout_seconds,
         )
-        df, proba, pred, shap_df = score_window(
+        df, proba, pred, attack_proba, attack_pred, shap_df, alert_df = score_window(
             window_id=window_id,
             raw_csv=raw_csv,
             bundle=bundle,
             threshold=threshold,
-            feature_names=feature_names,
             shap_sample_rows=shap_sample_rows,
+            shap_top_n=shap_top_n,
         )
+        adwin_state, drift_events = update_adwin_monitor(
+            adwin=adwin,
+            scores=proba,
+            db=db,
+            window_id=window_id,
+            interface=interface,
+            source_file_tag=source_file_tag,
+            capture_mode="pcap_injection",
+        )
+        if drift_events and trigger_retrain is not None:
+            trigger_retrain(
+                f"adwin_drift_{len(drift_events)}",
+                source_file_tag=source_file_tag,
+                window_id=window_id,
+            )
         archived_pcap = archive_injected_pcap(pcap_path, processed_dir, window_id=window_id)
         summary = score_and_store_window(
             db=db,
@@ -964,6 +1396,8 @@ def process_injection_queue(
             df=df,
             proba=proba,
             pred=pred,
+            attack_proba=attack_proba,
+            attack_pred=attack_pred,
             threshold=threshold,
             fields=fields,
             unsupported_fields=unsupported_fields,
@@ -980,12 +1414,16 @@ def process_injection_queue(
             display_filter=display_filter,
             packet_count=packet_count,
             shap_df=shap_df,
+            alert_df=alert_df,
             anomaly_bundle=anomaly_bundle,
             drift_reference_raw=drift_reference_raw,
             drift_n_bins=drift_n_bins,
             drift_min_category_count=drift_min_category_count,
             numeric_threshold=numeric_threshold,
             injected_pcap_path=str(archived_pcap),
+            model_version=model_version,
+            attack_model_version=attack_model_version,
+            adwin_state=adwin_state,
         )
         print(
             f"[inject {window_id}] pcap={pcap_path.name} records={summary['records']} "
@@ -1003,14 +1441,38 @@ def process_injection_queue(
 
 
 def record_loop(args: argparse.Namespace) -> None:
-    bundle = load_bundle(Path(args.model_path))
+    bundle_path = Path(args.model_path)
+    bundle = load_bundle(bundle_path)
     anomaly_bundle = load_anomaly_bundle(Path(args.anomaly_model_path))
     threshold = float(args.threshold if args.threshold is not None else bundle["threshold"])
     tshark = find_tshark(args.tshark)
+    interface_ok, interface_error = validate_capture_interface(tshark, args.interface)
+    if not interface_ok:
+        status = {
+            "state": "failed",
+            "started_at": utc_now().isoformat(),
+            "interface": args.interface,
+            "tshark": tshark,
+            "pid": os.getpid(),
+            "last_error": interface_error,
+            "model_path": str(bundle_path),
+        }
+        write_live_status(status_path=Path(args.status_path), base_status=status, last_window_id=0, state="failed")
+        print(f"ERROR: {interface_error}", file=sys.stderr)
+        raise SystemExit(1)
     valid_fields = available_tshark_fields(tshark) if args.validate_tshark_fields else None
     fields = bundle_field_contract(bundle, include_metadata=not args.no_metadata)
-    feature_names = get_transformed_feature_names(bundle["preprocessor"])
     drift_reference_box: dict[str, pd.DataFrame | None] = {"value": None}
+    adwin = ADWINMonitor(delta=args.adwin_delta, min_window=args.adwin_min_window, max_window=args.adwin_max_window)
+    retrain_lock = threading.Lock()
+    retrain_state: dict[str, object] = {
+        "running": False,
+        "last_started_at": None,
+        "last_finished_at": None,
+        "last_exit_code": None,
+        "last_result": None,
+        "last_process_pid": None,
+    }
 
     mongo_uri = args.mongo_uri
     db_name = args.db_name
@@ -1039,6 +1501,11 @@ def record_loop(args: argparse.Namespace) -> None:
         "injection_dir": str(injection_dir),
         "live_anomaly_enabled": bool(anomaly_bundle is not None),
         "live_drift_enabled": False,
+        "model_path": str(bundle_path),
+        "model_version": str(bundle.get("model_version") or bundle.get("active_pointer", {}).get("version") or "binary"),
+        "attack_model_version": str(bundle.get("attack_model_version") or bundle.get("active_pointer", {}).get("version") or "binary"),
+        "adwin_delta": float(args.adwin_delta),
+        "auto_retrain": bool(args.auto_retrain),
     }
     previous_status = read_status(Path(args.status_path))
     previous_window_id = int(previous_status.get("last_window_id", 0) or 0)
@@ -1051,6 +1518,99 @@ def record_loop(args: argparse.Namespace) -> None:
     last_window_id = max(previous_window_id, previous_live_window_id)
     status["last_window_id"] = last_window_id
     write_live_status(status_path=Path(args.status_path), base_status=status, last_window_id=last_window_id)
+
+    def trigger_retrain(reason: str, *, source_file_tag: str, window_id: int) -> None:
+        if not args.auto_retrain:
+            return
+        with retrain_lock:
+            if retrain_state["running"]:
+                return
+
+            retrain_state["running"] = True
+            retrain_state["last_started_at"] = utc_now().isoformat()
+            request_doc = {
+                "kind": "live_retrain_request",
+                "source": args.interface,
+                "source_file": source_file_tag,
+                "window_id": window_id,
+                "created_at": utc_now(),
+                "reason": reason,
+                "model_path": str(bundle_path),
+                "model_version": status.get("model_version"),
+                "attack_model_version": status.get("attack_model_version"),
+                "adwin_state": json_safe({**adwin.state.__dict__, "window": list(adwin.state.window)}),
+                "auto_retrain": True,
+            }
+            insert_documents(db[RETRAIN_EVENTS_COLLECTION], [request_doc])
+
+        def _run_retrain() -> None:
+            try:
+                proc = launch_retrain_job(
+                    retrain_script=REPO_ROOT / "src" / "edge_iiot_retrain.py",
+                    classifier_bundle=bundle_path,
+                    model_pointer=Path(args.model_pointer_path),
+                    mongo_uri=mongo_uri,
+                    db_name=db_name,
+                    recent_live_rows=args.retrain_recent_rows,
+                    report_dir=Path(args.output_dir).parent / "reports",
+                    edge_csv=Path(DEFAULT_EDGE_CSV),
+                    numeric_threshold=args.numeric_threshold,
+                    min_category_count=args.retrain_min_category_count,
+                )
+                retrain_state["last_process_pid"] = int(proc.pid)
+                exit_code = proc.wait()
+                retrain_state["last_exit_code"] = int(exit_code)
+                retrain_state["last_finished_at"] = utc_now().isoformat()
+                result_doc = {
+                    "kind": "live_retrain_result",
+                    "source": args.interface,
+                    "source_file": source_file_tag,
+                    "window_id": window_id,
+                    "created_at": utc_now(),
+                    "reason": reason,
+                    "exit_code": int(exit_code),
+                    "model_pointer_path": str(args.model_pointer_path),
+                    "model_path": str(bundle_path),
+                    "accepted": bool(exit_code == 0),
+                }
+                insert_documents(db[RETRAIN_EVENTS_COLLECTION], [result_doc])
+                status_update = {
+                    "last_retrain_reason": reason,
+                    "last_retrain_exit_code": int(exit_code),
+                    "last_retrain_finished_at": retrain_state["last_finished_at"],
+                }
+                write_live_status(
+                    status_path=Path(args.status_path),
+                    base_status={**status, **status_update},
+                    last_window_id=window_id,
+                    extra={"retrain_state": json_safe(retrain_state)},
+                )
+            except Exception as exc:
+                retrain_state["last_exit_code"] = 1
+                retrain_state["last_finished_at"] = utc_now().isoformat()
+                insert_documents(
+                    db[RETRAIN_EVENTS_COLLECTION],
+                    [
+                        {
+                            "kind": "live_retrain_result",
+                            "source": args.interface,
+                            "source_file": source_file_tag,
+                            "window_id": window_id,
+                            "created_at": utc_now(),
+                            "reason": reason,
+                            "exit_code": 1,
+                            "error": str(exc),
+                            "model_pointer_path": str(args.model_pointer_path),
+                            "model_path": str(bundle_path),
+                            "accepted": False,
+                        }
+                    ],
+                )
+            finally:
+                with retrain_lock:
+                    retrain_state["running"] = False
+
+        threading.Thread(target=_run_retrain, daemon=True).start()
 
     if not args.disable_live_drift:
         def _load_drift_reference() -> None:
@@ -1090,6 +1650,7 @@ def record_loop(args: argparse.Namespace) -> None:
     print(f"live drift  : {'background load enabled' if not args.disable_live_drift else 'disabled'}")
 
     try:
+        current_bundle = lambda: load_bundle(bundle_path)
         injection_common_kwargs = {
             "anomaly_bundle": anomaly_bundle,
             "tshark": tshark,
@@ -1105,13 +1666,16 @@ def record_loop(args: argparse.Namespace) -> None:
             "min_records": args.min_records,
             "display_filter": args.display_filter,
             "packet_count": args.packet_count,
-            "feature_names": feature_names,
             "shap_sample_rows": args.shap_sample_rows,
             "shap_top_n": args.shap_top_n,
             "drift_n_bins": args.drift_n_bins,
             "drift_min_category_count": args.drift_min_category_count,
             "numeric_threshold": args.numeric_threshold,
             "tshark_timeout_seconds": args.tshark_timeout_seconds,
+            "adwin": adwin,
+            "trigger_retrain": trigger_retrain,
+            "model_version": status["model_version"],
+            "attack_model_version": status["attack_model_version"],
         }
 
         def build_injection_kwargs() -> dict[str, object]:
@@ -1126,7 +1690,7 @@ def record_loop(args: argparse.Namespace) -> None:
                     db=db,
                     status_path=Path(args.status_path),
                     base_status=status,
-                    bundle=bundle,
+                    bundle_path=bundle_path,
                     **build_injection_kwargs(),
                     window_id=last_window_id,
                 )
@@ -1134,6 +1698,9 @@ def record_loop(args: argparse.Namespace) -> None:
                 if args.max_windows and args.max_windows > 0 and current_window_id > args.max_windows:
                     break
 
+                bundle = current_bundle()
+                status["model_version"] = str(bundle.get("model_version") or bundle.get("active_pointer", {}).get("version") or "binary")
+                status["attack_model_version"] = str(bundle.get("attack_model_version") or bundle.get("active_pointer", {}).get("version") or "binary")
                 source_file_tag = live_window_tag(current_window_id)
                 raw_csv = capture_dir / f"{source_file_tag}.csv"
                 start_time = utc_now()
@@ -1162,13 +1729,13 @@ def record_loop(args: argparse.Namespace) -> None:
                         time.sleep(args.pause_seconds)
                     continue
 
-                df, proba, pred, shap_df = score_window(
+                df, proba, pred, attack_proba, attack_pred, shap_df, alert_df = score_window(
                     window_id=current_window_id,
                     raw_csv=raw_csv,
                     bundle=bundle,
                     threshold=threshold,
-                    feature_names=feature_names,
                     shap_sample_rows=args.shap_sample_rows,
+                    shap_top_n=args.shap_top_n,
                 )
                 if df.empty:
                     print(f"[{current_window_id}] empty capture window")
@@ -1203,6 +1770,9 @@ def record_loop(args: argparse.Namespace) -> None:
                         "shap_available": False,
                         "supported_tshark_fields": "|".join(supported_fields),
                         "injected_pcap_path": None,
+                        "model_version": status["model_version"],
+                        "attack_model_version": status["attack_model_version"],
+                        "adwin_state": json_safe(adwin.state.__dict__),
                     }
                     insert_documents(db[LIVE_WINDOWS_COLLECTION], [summary])
                     write_live_status_success(
@@ -1215,6 +1785,21 @@ def record_loop(args: argparse.Namespace) -> None:
                     continue
 
                 X = prepare_window_frame(df, bundle)
+                adwin_state, drift_events = update_adwin_monitor(
+                    adwin=adwin,
+                    scores=proba,
+                    db=db,
+                    window_id=current_window_id,
+                    interface=args.interface,
+                    source_file_tag=source_file_tag,
+                    capture_mode="live_capture",
+                )
+                if drift_events and args.auto_retrain:
+                    trigger_retrain(
+                        f"adwin_drift_{len(drift_events)}",
+                        source_file_tag=source_file_tag,
+                        window_id=current_window_id,
+                    )
                 summary = score_and_store_window(
                     db=db,
                     window_id=current_window_id,
@@ -1224,6 +1809,8 @@ def record_loop(args: argparse.Namespace) -> None:
                     df=df,
                     proba=proba,
                     pred=pred,
+                    attack_proba=attack_proba,
+                    attack_pred=attack_pred,
                     threshold=threshold,
                     fields=fields,
                     unsupported_fields=unsupported_fields,
@@ -1240,6 +1827,7 @@ def record_loop(args: argparse.Namespace) -> None:
                     display_filter=args.display_filter,
                     packet_count=args.packet_count,
                     shap_df=shap_df,
+                    alert_df=alert_df,
                     anomaly_bundle=anomaly_bundle,
                     drift_reference_raw=drift_reference_box["value"],
                     drift_n_bins=args.drift_n_bins,
@@ -1247,6 +1835,9 @@ def record_loop(args: argparse.Namespace) -> None:
                     numeric_threshold=args.numeric_threshold,
                     tshark_timeout_seconds=args.tshark_timeout_seconds,
                     injected_pcap_path=None,
+                    model_version=status["model_version"],
+                    attack_model_version=status["attack_model_version"],
+                    adwin_state=adwin_state,
                 )
 
                 print(
@@ -1267,7 +1858,7 @@ def record_loop(args: argparse.Namespace) -> None:
                     db=db,
                     status_path=Path(args.status_path),
                     base_status=status,
-                    bundle=bundle,
+                    bundle_path=bundle_path,
                     **build_injection_kwargs(),
                     window_id=last_window_id,
                 )
@@ -1301,7 +1892,7 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     live_parser = subparsers.add_parser("live", help="Capture live windows, score them, and write to MongoDB.")
-    live_parser.add_argument("--model_path", default=str(DEFAULT_MODEL_PATH))
+    live_parser.add_argument("--model_path", default=str(DEFAULT_MODEL_POINTER_PATH))
     live_parser.add_argument("--anomaly_model_path", default=str(DEFAULT_ANOMALY_MODEL_PATH))
     live_parser.add_argument("--interface", required=True)
     live_parser.add_argument("--tshark", default=None)
@@ -1320,6 +1911,13 @@ def build_parser() -> argparse.ArgumentParser:
     live_parser.add_argument("--drift_n_bins", type=int, default=DEFAULT_DRIFT_N_BINS)
     live_parser.add_argument("--drift_min_category_count", type=int, default=DEFAULT_DRIFT_MIN_CATEGORY_COUNT)
     live_parser.add_argument("--numeric_threshold", type=float, default=0.95)
+    live_parser.add_argument("--adwin_delta", type=float, default=DEFAULT_ADWIN_DELTA)
+    live_parser.add_argument("--adwin_min_window", type=int, default=DEFAULT_ADWIN_MIN_WINDOW)
+    live_parser.add_argument("--adwin_max_window", type=int, default=DEFAULT_ADWIN_MAX_WINDOW)
+    live_parser.add_argument("--auto_retrain", action="store_true")
+    live_parser.add_argument("--model_pointer_path", default=str(DEFAULT_MODEL_POINTER_PATH))
+    live_parser.add_argument("--retrain_recent_rows", type=int, default=5000)
+    live_parser.add_argument("--retrain_min_category_count", type=int, default=20)
     live_parser.add_argument("--tshark_timeout_seconds", type=int, default=120)
     live_parser.add_argument("--disable_live_drift", action="store_true")
     live_parser.add_argument("--mongo_uri", default="mongodb://localhost:27017")

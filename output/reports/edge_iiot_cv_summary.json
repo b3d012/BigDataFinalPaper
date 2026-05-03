@@ -1,0 +1,90 @@
+{
+  "cv_folds": 5,
+  "threshold": 0.5,
+  "use_smote": true,
+  "smote_training_only": true,
+  "strategy": "stratified_kfold_with_fold_local_smote",
+  "metric_summary": {
+    "accuracy": {
+      "mean": 0.9752334609943357,
+      "std": 0.0011813615857606337
+    },
+    "roc_auc": {
+      "mean": 0.9924934594992353,
+      "std": 0.00033967950023400077
+    },
+    "pr_auc": {
+      "mean": 0.9985871143763794,
+      "std": 6.29620234347815e-05
+    },
+    "attack_precision": {
+      "mean": 0.971760830622269,
+      "std": 0.0012247699947660231
+    },
+    "attack_recall": {
+      "mean": 0.9997512906507895,
+      "std": 0.00018189725117605623
+    },
+    "attack_fnr": {
+      "mean": 0.00024870934921053625,
+      "std": 0.00018189725117605113
+    }
+  },
+  "overall_oof_metrics": {
+    "accuracy": 0.9752334603085625,
+    "roc_auc": 0.9924861386878537,
+    "pr_auc": 0.9985930416615287,
+    "attack_precision": 0.9717596899792684,
+    "attack_recall": 0.9997512906507895,
+    "attack_fnr": 0.00024870934921053625
+  },
+  "aggregate_confusion_matrix": [
+    [
+      20446,
+      3855
+    ],
+    [
+      33,
+      132652
+    ]
+  ],
+  "fold_confusions": [
+    {
+      "fold": 1,
+      "tn": 4083,
+      "fp": 778,
+      "fn": 3,
+      "tp": 26534
+    },
+    {
+      "fold": 2,
+      "tn": 4128,
+      "fp": 732,
+      "fn": 9,
+      "tp": 26528
+    },
+    {
+      "fold": 3,
+      "tn": 4063,
+      "fp": 797,
+      "fn": 10,
+      "tp": 26527
+    },
+    {
+      "fold": 4,
+      "tn": 4121,
+      "fp": 739,
+      "fn": 0,
+      "tp": 26537
+    },
+    {
+      "fold": 5,
+      "tn": 4051,
+      "fp": 809,
+      "fn": 11,
+      "tp": 26526
+    }
+  ],
+  "rows_total": 156986,
+  "runtime_seconds": 23.92698869999731
+}

@@ -22,9 +22,20 @@ from sklearn.metrics import (
     roc_auc_score,
 )
 from sklearn.model_selection import StratifiedKFold, train_test_split
+from sklearn.model_selection import ParameterGrid
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OneHotEncoder
+from sklearn.preprocessing import LabelEncoder
+from sklearn.utils.class_weight import compute_sample_weight
 from xgboost import XGBClassifier
+from edge_iiot_runtime import (
+    DEFAULT_ACTIVE_MODEL_POINTER_PATH,
+    DEFAULT_FEATURE_CONTRACT_PATH,
+    feature_contract_from_meta,
+    json_safe,
+    save_active_model_pointer,
+    save_feature_contract,
+)
 
 try:
     from imblearn.over_sampling import SMOTE
@@ -797,6 +808,154 @@ def save_cv_reports(cv_result: dict[str, object], report_dir: Path) -> dict[str,
     }
 
 
+def save_binary_artifacts(
+    *,
+    bundle: dict[str, object],
+    model_path: Path,
+    feature_contract_path: Path = DEFAULT_FEATURE_CONTRACT_PATH,
+    pointer_path: Path = DEFAULT_ACTIVE_MODEL_POINTER_PATH,
+) -> dict[str, Path]:
+    model_path.parent.mkdir(parents=True, exist_ok=True)
+    joblib.dump(
+        {
+            "model": bundle["model"],
+            "preprocessor": bundle["preprocessor"],
+            "threshold": bundle["threshold"],
+            "threshold_strategy": bundle["threshold_strategy"],
+            "fixed_threshold": bundle["fixed_threshold"],
+            "threshold_meta": bundle["threshold_meta"],
+            "training_meta": bundle["training_meta"],
+            "evaluation_metrics": bundle["evaluation_metrics"],
+            "evaluation_report": bundle["evaluation_report"],
+            "runtime": bundle["runtime"],
+            "feature_contract": bundle.get("feature_contract"),
+            "model_version": bundle.get("model_version"),
+        },
+        model_path,
+    )
+    feature_contract = save_feature_contract(
+        bundle["training_meta"],
+        feature_contract_path,
+        dataset_name=bundle["training_meta"].get("edge_csv", DEFAULT_EDGE_CSV),
+        model_family="binary_xgb",
+        label_source=str(bundle["training_meta"].get("label_source", "Attack_label")),
+        version=str(bundle.get("model_version") or bundle.get("runtime", {}).get("model_version") or "binary"),
+        extra={
+            "threshold": bundle["threshold"],
+            "threshold_strategy": bundle["threshold_strategy"],
+            "fixed_threshold": bundle["fixed_threshold"],
+            "evaluation_metrics": bundle["evaluation_metrics"],
+            "feature_names": list(bundle["training_meta"].get("feature_columns", [])),
+            "transformed_feature_names": list(get_transformed_feature_names(bundle["preprocessor"])),
+        },
+    )
+    pointer = save_active_model_pointer(
+        pointer_path,
+        binary_model_path=model_path,
+        feature_contract_path=feature_contract,
+        threshold_path=model_path.with_suffix(".metadata.json"),
+        version=str(bundle.get("model_version") or bundle.get("runtime", {}).get("model_version") or "binary"),
+        extra={
+            "kind": "active_model_pointer",
+            "binary_threshold": bundle["threshold"],
+            "binary_threshold_strategy": bundle["threshold_strategy"],
+            "label_source": bundle["training_meta"].get("label_source"),
+        },
+    )
+    return {
+        "model": model_path,
+        "feature_contract": feature_contract,
+        "pointer": pointer,
+    }
+
+
+def grid_search_binary_models(
+    X: pd.DataFrame,
+    y: pd.Series,
+    *,
+    min_category_count: int,
+    training_meta: dict[str, object],
+    cv_folds: int = 5,
+    param_grid: dict[str, list[object]] | None = None,
+) -> dict[str, object]:
+    if cv_folds < 2:
+        raise ValueError("cv_folds must be at least 2.")
+    grid = param_grid or {
+        "n_estimators": [100, 300, 500],
+        "max_depth": [4, 6, 8],
+        "learning_rate": [0.01, 0.05, 0.1],
+        "subsample": [0.7, 0.85, 1.0],
+    }
+    skf = StratifiedKFold(n_splits=cv_folds, shuffle=True, random_state=42)
+    rows: list[dict[str, object]] = []
+    for params in ParameterGrid(grid):
+        fold_scores: list[float] = []
+        fold_ap: list[float] = []
+        for fold, (train_idx, val_idx) in enumerate(skf.split(X, y), start=1):
+            X_train = X.iloc[train_idx]
+            y_train = y.iloc[train_idx]
+            X_val = X.iloc[val_idx]
+            y_val = y.iloc[val_idx]
+            preprocessor = make_preprocessor(
+                training_meta["numeric_columns"],
+                training_meta["categorical_columns"],
+                min_category_count=min_category_count,
+            )
+            X_train_tx = preprocessor.fit_transform(X_train)
+            X_val_tx = preprocessor.transform(X_val)
+            pos = int((y_train == 1).sum())
+            neg = int((y_train == 0).sum())
+            model = XGBClassifier(
+                objective="binary:logistic",
+                n_estimators=int(params["n_estimators"]),
+                max_depth=int(params["max_depth"]),
+                learning_rate=float(params["learning_rate"]),
+                subsample=float(params["subsample"]),
+                colsample_bytree=0.85,
+                reg_lambda=1.0,
+                min_child_weight=3,
+                random_state=42,
+                n_jobs=-1,
+                tree_method="hist",
+                eval_metric="aucpr",
+                scale_pos_weight=(neg / pos) if pos else 1.0,
+            )
+            model.fit(X_train_tx, y_train)
+            val_proba = model.predict_proba(X_val_tx)[:, 1]
+            fold_eval = evaluation_from_predictions(y_val, val_proba, threshold=0.5)
+            fold_scores.append(float(fold_eval["metrics"]["pr_auc"]))
+            fold_ap.append(float(fold_eval["metrics"]["precision"]))
+        rows.append(
+            {
+                **params,
+                "cv_folds": int(cv_folds),
+                "mean_pr_auc": float(np.mean(fold_scores)),
+                "std_pr_auc": float(np.std(fold_scores, ddof=1)) if len(fold_scores) > 1 else 0.0,
+                "mean_precision": float(np.mean(fold_ap)),
+            }
+        )
+    grid_df = pd.DataFrame(rows).sort_values(
+        ["mean_pr_auc", "mean_precision", "n_estimators", "max_depth", "learning_rate", "subsample"],
+        ascending=[False, False, True, True, True, True],
+        kind="mergesort",
+    )
+    best_row = grid_df.iloc[0].to_dict()
+    return {
+        "grid": grid_df,
+        "best_row": best_row,
+    }
+
+
+def save_grid_search_reports(result: dict[str, object], report_dir: Path) -> dict[str, Path]:
+    report_dir.mkdir(parents=True, exist_ok=True)
+    grid_path = report_dir / "edge_iiot_tuning_grid.csv"
+    summary_path = report_dir / "edge_iiot_tuning_summary.json"
+    result["grid"].to_csv(grid_path, index=False)
+    with summary_path.open("w", encoding="utf-8") as fh:
+        json.dump(json_safe(result["best_row"]), fh, indent=2)
+    return {"grid": grid_path, "summary": summary_path}
+
+
 def train_command(args: argparse.Namespace) -> None:
     command_started = time.perf_counter()
     prep_started = time.perf_counter()
@@ -829,28 +988,15 @@ def train_command(args: argparse.Namespace) -> None:
         min_precision=args.min_precision,
         training_meta=training_meta,
     )
+    bundle["model_version"] = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
     total_seconds = time.perf_counter() - command_started
     bundle["runtime"]["preprocessing_seconds"] = float(preprocessing_seconds)
     bundle["runtime"]["train_command_total_seconds"] = float(total_seconds)
 
     model_path = Path(args.model_out)
-    model_path.parent.mkdir(parents=True, exist_ok=True)
-    joblib.dump(
-        {
-            "model": bundle["model"],
-            "preprocessor": bundle["preprocessor"],
-            "threshold": bundle["threshold"],
-            "threshold_strategy": bundle["threshold_strategy"],
-            "fixed_threshold": bundle["fixed_threshold"],
-            "threshold_meta": bundle["threshold_meta"],
-            "training_meta": bundle["training_meta"],
-            "evaluation_metrics": bundle["evaluation_metrics"],
-            "evaluation_report": bundle["evaluation_report"],
-            "runtime": bundle["runtime"],
-        },
-        model_path,
-    )
+    artifacts = save_binary_artifacts(bundle=bundle, model_path=model_path)
     print(f"\nSaved model bundle: {model_path}")
+    print(f"Saved active pointer: {artifacts['pointer']}")
 
     importance_path = model_path.with_suffix(".feature_importance.csv")
     bundle["feature_importance"].to_csv(importance_path, index=False)
@@ -860,12 +1006,15 @@ def train_command(args: argparse.Namespace) -> None:
     with meta_path.open("w", encoding="utf-8") as fh:
         json.dump(
             {
+                "model_version": bundle["model_version"],
                 "threshold": bundle["threshold"],
                 "threshold_strategy": bundle["threshold_strategy"],
                 "threshold_meta": bundle["threshold_meta"],
                 "training_meta": bundle["training_meta"],
                 "evaluation_metrics": bundle["evaluation_metrics"],
                 "runtime": bundle["runtime"],
+                "feature_contract_path": str(artifacts["feature_contract"]),
+                "active_model_pointer_path": str(artifacts["pointer"]),
             },
             fh,
             indent=2,
@@ -909,9 +1058,182 @@ def train_command(args: argparse.Namespace) -> None:
     print(f"Total train command: {total_seconds:.3f}s")
 
 
+def tune_command(args: argparse.Namespace) -> None:
+    prep_started = time.perf_counter()
+    X, y, training_meta = prepare_training_frame(
+        args.edge_csv,
+        keep_identity_payload=args.keep_identity_payload,
+        numeric_threshold=args.numeric_threshold,
+        sample_rows=args.sample_rows,
+        drop_duplicates=not args.keep_duplicates,
+    )
+    preprocessing_seconds = time.perf_counter() - prep_started
+    result = grid_search_binary_models(
+        X,
+        y,
+        min_category_count=args.min_category_count,
+        training_meta=training_meta,
+        cv_folds=args.cv_folds,
+    )
+    report_dir = Path(args.report_dir)
+    report_dir.mkdir(parents=True, exist_ok=True)
+    paths = save_grid_search_reports(result, report_dir)
+    print("Binary tuning complete.")
+    print(f"Grid search CSV : {paths['grid']}")
+    print(f"Best row JSON   : {paths['summary']}")
+    print(f"Preprocessing s : {preprocessing_seconds:.3f}")
+    print(pd.DataFrame([result["best_row"]]).to_string(index=False))
+
+
+def train_multiclass_command(args: argparse.Namespace) -> None:
+    from edge_iiot_multiclass import prepare_attack_training_frame, train_attack_bundle
+
+    prep_started = time.perf_counter()
+    X, y, label_encoder, training_meta = prepare_attack_training_frame(
+        args.edge_csv,
+        keep_identity_payload=args.keep_identity_payload,
+        numeric_threshold=args.numeric_threshold,
+        sample_rows=args.sample_rows,
+        drop_duplicates=not args.keep_duplicates,
+    )
+    preprocessing_seconds = time.perf_counter() - prep_started
+    print("\nMulticlass training data:")
+    print(f"Attack rows           : {len(X):,}")
+    print(f"Attack classes        : {len(label_encoder.classes_):,}")
+    print(f"Class distribution:")
+    print(pd.Series(label_encoder.inverse_transform(y.to_numpy())).value_counts().sort_index().to_string())
+
+    result = train_attack_bundle(
+        X,
+        y,
+        label_encoder=label_encoder,
+        training_meta={
+            **training_meta,
+            "binary_model_path": str(Path(args.binary_model_path)),
+            "version": time.strftime("%Y%m%dT%H%M%SZ", time.gmtime()),
+        },
+        min_category_count=args.min_category_count,
+        threshold_min_precision=args.min_precision,
+        critical_classes=args.critical_classes,
+        model_out=args.model_out,
+        feature_contract_out=args.feature_contract_out,
+        pointer_out=args.pointer_out,
+    )
+    bundle = result["bundle"]
+    report_dir = Path(args.report_dir)
+    report_dir.mkdir(parents=True, exist_ok=True)
+
+    holdout_predictions_path = report_dir / "edge_iiot_multiclass_holdout_predictions.csv"
+    threshold_path = report_dir / "edge_iiot_multiclass_thresholds.csv"
+    summary_path = report_dir / "edge_iiot_multiclass_summary.json"
+    class_report_path = report_dir / "edge_iiot_multiclass_classification_report.csv"
+    confusion_path = report_dir / "edge_iiot_multiclass_confusion_matrix.csv"
+
+    bundle["holdout_predictions"].to_csv(holdout_predictions_path, index=False)
+    result["thresholds"]["table"].to_csv(threshold_path, index=False)
+    pd.DataFrame(bundle["evaluation_report"]).T.to_csv(class_report_path)
+    pd.DataFrame(
+        bundle["confusion_matrix"],
+        index=[str(cls) for cls in label_encoder.classes_],
+        columns=[str(cls) for cls in label_encoder.classes_],
+    ).to_csv(confusion_path)
+    with summary_path.open("w", encoding="utf-8") as fh:
+        json.dump(
+            {
+                "model_path": str(result["bundle_path"]),
+                "feature_contract_path": str(result["feature_contract_path"]),
+                "pointer_path": str(result["pointer_path"]),
+                "preprocessing_seconds": float(preprocessing_seconds),
+                "training_meta": training_meta,
+                "evaluation_metrics": bundle["evaluation_metrics"],
+                "thresholds": json_safe({**result["thresholds"], "table": result["thresholds"]["table"].to_dict(orient="records")}),
+                "runtime": bundle["runtime"],
+            },
+            fh,
+            indent=2,
+        )
+    print("Multiclass training complete.")
+    print(f"Model bundle       : {result['bundle_path']}")
+    print(f"Holdout predictions: {holdout_predictions_path}")
+    print(f"Thresholds CSV     : {threshold_path}")
+    print(f"Summary JSON       : {summary_path}")
+    print(f"Feature contract   : {result['feature_contract_path']}")
+    print(f"Active pointer     : {result['pointer_path']}")
+
+
+def robustness_command(args: argparse.Namespace) -> None:
+    from edge_iiot_robustness import evaluate_robustness
+
+    result = evaluate_robustness(
+        classifier_bundle_path=args.classifier_bundle,
+        anomaly_bundle_path=args.anomaly_bundle,
+        edge_csv=args.edge_csv,
+        sample_rows=args.sample_rows,
+        epsilon=args.epsilon,
+        pgd_steps=args.pgd_steps,
+        pgd_step_size=args.pgd_step_size,
+        output_path=args.output_path,
+    )
+    print("Robustness evaluation complete.")
+    print(json.dumps(result["deltas"], indent=2))
+
+
+def ablation_command(args: argparse.Namespace) -> None:
+    report_dir = Path(args.report_dir)
+    rows: list[dict[str, object]] = []
+    def add_row(name: str, metric_source: dict[str, object] | None, metric_keys: list[str]) -> None:
+        if not metric_source:
+            return
+        metrics = metric_source.get("evaluation_metrics") or metric_source.get("metrics") or {}
+        if not isinstance(metrics, dict):
+            return
+        row = {"layer": name}
+        for key in metric_keys:
+            value = metrics.get(key)
+            if value is not None:
+                row[key] = float(value)
+        rows.append(row)
+
+    for path, name in [
+        (report_dir / "edge_iiot_holdout_metrics.json", "binary_baseline"),
+        (report_dir / "edge_iiot_cv_summary.json", "smote_cv"),
+        (report_dir / "edge_iiot_anomaly_holdout_metrics.json", "anomaly"),
+        (report_dir / "edge_iiot_drift_summary.json", "drift"),
+        (report_dir / "edge_iiot_retrain_comparison.json", "retrain"),
+    ]:
+        if path.exists():
+            with path.open("r", encoding="utf-8") as fh:
+                payload = json.load(fh)
+            add_row(name, payload, ["accuracy", "pr_auc", "macro_f1", "attack_recall", "attack_fnr"])
+
+    if args.robustness_report and Path(args.robustness_report).exists():
+        with Path(args.robustness_report).open("r", encoding="utf-8") as fh:
+            payload = json.load(fh)
+        rows.append(
+            {
+                "layer": "robustness",
+                "clean_attack_recall": float(payload.get("clean_metrics", {}).get("attack_recall", 0.0)),
+                "fgsm_attack_recall": float(payload.get("fgsm_metrics", {}).get("attack_recall", 0.0)),
+                "pgd_attack_recall": float(payload.get("pgd_metrics", {}).get("attack_recall", 0.0)),
+            }
+        )
+
+    ablation_df = pd.DataFrame(rows)
+    if ablation_df.empty:
+        raise SystemExit("No ablation inputs available.")
+    csv_path = report_dir / "edge_iiot_ablation_summary.csv"
+    json_path = report_dir / "edge_iiot_ablation_summary.json"
+    ablation_df.to_csv(csv_path, index=False)
+    with json_path.open("w", encoding="utf-8") as fh:
+        json.dump(json_safe(rows), fh, indent=2)
+    print("Ablation summary complete.")
+    print(f"CSV  : {csv_path}")
+    print(f"JSON : {json_path}")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Offline Edge-IIoT binary IDS trainer using the archived XGBoost pipeline."
+        description="Offline Edge-IIoT IDS trainer and evaluation utilities."
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -948,14 +1270,59 @@ def build_parser() -> argparse.ArgumentParser:
     )
     train_parser.set_defaults(func=train_command)
 
+    tune_parser = subparsers.add_parser("tune", help="Run binary XGBoost hyperparameter tuning.")
+    tune_parser.add_argument("--edge_csv", default=DEFAULT_EDGE_CSV)
+    tune_parser.add_argument("--report_dir", default=str(DEFAULT_REPORT_DIR))
+    tune_parser.add_argument("--sample_rows", type=int, default=None)
+    tune_parser.add_argument("--keep_duplicates", action="store_true")
+    tune_parser.add_argument("--keep_identity_payload", action="store_true")
+    tune_parser.add_argument("--numeric_threshold", type=float, default=0.95)
+    tune_parser.add_argument("--min_category_count", type=int, default=20)
+    tune_parser.add_argument("--cv_folds", type=int, default=5)
+    tune_parser.set_defaults(func=tune_command)
+
+    multiclass_parser = subparsers.add_parser("train_multiclass", help="Train the attack-only multiclass detector.")
+    multiclass_parser.add_argument("--edge_csv", default=DEFAULT_EDGE_CSV)
+    multiclass_parser.add_argument("--binary_model_path", default=str(DEFAULT_MODEL_PATH))
+    multiclass_parser.add_argument("--model_out", default="models/edge_iiot_attack_xgb_model.joblib")
+    multiclass_parser.add_argument("--feature_contract_out", default=str(DEFAULT_FEATURE_CONTRACT_PATH))
+    multiclass_parser.add_argument("--pointer_out", default=str(DEFAULT_ACTIVE_MODEL_POINTER_PATH))
+    multiclass_parser.add_argument("--report_dir", default=str(DEFAULT_REPORT_DIR))
+    multiclass_parser.add_argument("--sample_rows", type=int, default=None)
+    multiclass_parser.add_argument("--keep_duplicates", action="store_true")
+    multiclass_parser.add_argument("--keep_identity_payload", action="store_true")
+    multiclass_parser.add_argument("--numeric_threshold", type=float, default=0.95)
+    multiclass_parser.add_argument("--min_category_count", type=int, default=20)
+    multiclass_parser.add_argument("--min_precision", type=float, default=0.97)
+    multiclass_parser.add_argument(
+        "--critical_classes",
+        nargs="*",
+        default=["Ransomware", "MITM", "DDoS_HTTP", "DDoS_TCP", "DDoS_UDP", "DDoS_ICMP"],
+    )
+    multiclass_parser.set_defaults(func=train_multiclass_command)
+
+    robustness_parser = subparsers.add_parser("robustness", help="Evaluate surrogate FGSM/PGD robustness.")
+    robustness_parser.add_argument("--classifier_bundle", default=str(DEFAULT_MODEL_PATH))
+    robustness_parser.add_argument("--anomaly_bundle", default="models/edge_iiot_isolation_forest.joblib")
+    robustness_parser.add_argument("--edge_csv", default=DEFAULT_EDGE_CSV)
+    robustness_parser.add_argument("--sample_rows", type=int, default=None)
+    robustness_parser.add_argument("--epsilon", type=float, default=0.05)
+    robustness_parser.add_argument("--pgd_steps", type=int, default=5)
+    robustness_parser.add_argument("--pgd_step_size", type=float, default=0.01)
+    robustness_parser.add_argument("--output_path", default="output/reports/edge_iiot_adversarial_robustness.json")
+    robustness_parser.set_defaults(func=robustness_command)
+
+    ablation_parser = subparsers.add_parser("ablation", help="Summarize layer-level evidence from saved reports.")
+    ablation_parser.add_argument("--report_dir", default=str(DEFAULT_REPORT_DIR))
+    ablation_parser.add_argument("--robustness_report", default="output/reports/edge_iiot_adversarial_robustness.json")
+    ablation_parser.set_defaults(func=ablation_command)
+
     return parser
 
 
 def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
-    if args.command != "train":
-        raise SystemExit("Only the train command is supported in this offline rebuild.")
 
     try:
         args.func(args)

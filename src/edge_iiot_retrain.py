@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 import joblib
@@ -15,8 +16,11 @@ from edge_iiot_experiment import (
     evaluation_from_predictions,
     make_preprocessor,
     prepare_training_frame,
+    coerce_feature_types,
     train_xgb_with_balance,
 )
+from edge_iiot_mongo import PREDICTIONS_COLLECTION, RETRAIN_EVENTS_COLLECTION, collection_to_dataframe, connect_database, insert_documents
+from edge_iiot_runtime import DEFAULT_ACTIVE_MODEL_POINTER_PATH, load_active_model_pointer, resolve_model_path, save_active_model_pointer
 
 
 DEFAULT_CLASSIFIER_BUNDLE = Path("models/edge_iiot_xgb_model.joblib")
@@ -26,6 +30,8 @@ DEFAULT_TRIGGER_JSON = DEFAULT_REPORT_DIR / "edge_iiot_retrain_trigger.json"
 DEFAULT_COMPARISON_JSON = DEFAULT_REPORT_DIR / "edge_iiot_retrain_comparison.json"
 DEFAULT_COMPARISON_CSV = DEFAULT_REPORT_DIR / "edge_iiot_retrain_comparison.csv"
 DEFAULT_RUN_SUMMARY = DEFAULT_REPORT_DIR / "edge_iiot_retrain_run_summary.md"
+DEFAULT_RECENT_LIVE_ROWS = 5000
+DEFAULT_MODEL_POINTER_PATH = DEFAULT_ACTIVE_MODEL_POINTER_PATH
 
 DEFAULT_REFERENCE_FRACTION = 0.60
 DEFAULT_DRIFT_FRACTION = 0.20
@@ -38,12 +44,74 @@ DEFAULT_MODERATE_FEATURE_COUNT = 12
 def load_bundle(model_path: Path) -> dict[str, object]:
     if not model_path.exists():
         raise FileNotFoundError(f"Classifier bundle not found: {model_path}")
+    if model_path.suffix.lower() == ".json":
+        pointer = load_active_model_pointer(model_path)
+        if not pointer:
+            raise ValueError(f"Classifier pointer is missing or invalid: {model_path}")
+        model_path = resolve_model_path(model_path, "binary_model_path")
     bundle = joblib.load(model_path)
     required = {"model", "preprocessor", "threshold", "training_meta"}
     missing = required - set(bundle.keys())
     if missing:
         raise ValueError(f"Classifier bundle is missing required keys: {sorted(missing)}")
     return bundle
+
+
+def load_recent_labeled_live_rows(mongo_uri: str, db_name: str, *, limit: int) -> pd.DataFrame:
+    db = connect_database(mongo_uri, db_name)
+    df = collection_to_dataframe(
+        db[PREDICTIONS_COLLECTION],
+        query={"kind": "live_prediction"},
+        projection={"_id": 0},
+        sort=[("created_at", -1), ("window_id", -1), ("record_index", -1)],
+        limit=limit,
+    )
+    if df.empty:
+        return df
+    if "true_label" not in df.columns:
+        return pd.DataFrame()
+    df = df.copy()
+    df["true_label"] = pd.to_numeric(df["true_label"], errors="coerce")
+    df = df[df["true_label"].notna()].copy()
+    if df.empty:
+        return df
+    sort_columns = [column for column in ["created_at", "window_id", "record_index"] if column in df.columns]
+    if sort_columns:
+        df = df.sort_values(sort_columns, ascending=True, kind="mergesort")
+    return df
+
+
+def prepare_live_retraining_frame(
+    live_df: pd.DataFrame,
+    training_meta: dict[str, object],
+    *,
+    numeric_threshold: float,
+) -> tuple[pd.DataFrame, pd.Series]:
+    feature_columns = list(training_meta["feature_columns"])
+    numeric_columns = list(training_meta.get("numeric_columns", []))
+    categorical_columns = list(training_meta.get("categorical_columns", []))
+
+    from edge_iiot_experiment import normalize_columns
+
+    live_df = normalize_columns(live_df)
+    work = pd.DataFrame(index=live_df.index)
+    for column in feature_columns:
+        if column in live_df.columns:
+            work[column] = live_df[column]
+        elif column in numeric_columns:
+            work[column] = np.nan
+        else:
+            work[column] = "__MISSING__"
+
+    typed, _, _, _ = coerce_feature_types(
+        work[feature_columns],
+        numeric_columns=numeric_columns,
+        categorical_columns=categorical_columns,
+        numeric_threshold=numeric_threshold,
+    )
+    labels = pd.to_numeric(live_df["true_label"], errors="coerce").astype("Int64")
+    labels = labels.fillna(0).astype(int)
+    return typed[feature_columns], pd.Series(labels.to_numpy(), name="true_label")
 
 
 def contiguous_split(n_rows: int, reference_fraction: float, drift_fraction: float) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -179,7 +247,7 @@ def assess_change(comparison: pd.DataFrame) -> str:
     return "little_difference"
 
 
-def save_retrained_bundle(bundle: dict[str, object], model_path: Path) -> None:
+def save_retrained_bundle(bundle: dict[str, object], model_path: Path, *, pointer_path: Path | None = None) -> None:
     model_path.parent.mkdir(parents=True, exist_ok=True)
     joblib.dump(bundle, model_path)
 
@@ -200,6 +268,22 @@ def save_retrained_bundle(bundle: dict[str, object], model_path: Path) -> None:
             ),
             fh,
             indent=2,
+        )
+    if pointer_path is not None:
+        pointer = load_active_model_pointer(pointer_path) or {}
+        save_active_model_pointer(
+            pointer_path,
+            binary_model_path=model_path,
+            attack_model_path=pointer.get("attack_model_path"),
+            feature_contract_path=pointer.get("feature_contract_path"),
+            threshold_path=meta_path,
+            multiclass_threshold_path=pointer.get("multiclass_threshold_path"),
+            version=str(bundle.get("model_version") or bundle.get("retraining_meta", {}).get("model_version") or None),
+            extra={
+                "kind": "active_model_pointer",
+                "updated_by": "adaptive_retrain",
+                "retraining_assessment": bundle.get("retraining_meta", {}).get("assessment"),
+            },
         )
 
 
@@ -246,14 +330,30 @@ def train_command(args: argparse.Namespace) -> None:
         classifier_bundle_path = Path(args.classifier_bundle)
         original_bundle = load_bundle(classifier_bundle_path)
         threshold = float(args.threshold if args.threshold is not None else original_bundle["threshold"])
-
-        X, y, _ = prepare_training_frame(
-            args.edge_csv,
-            keep_identity_payload=args.keep_identity_payload,
-            numeric_threshold=args.numeric_threshold,
-            sample_rows=args.sample_rows,
-            drop_duplicates=not args.keep_duplicates,
-        )
+        live_df = pd.DataFrame()
+        live_source_used = False
+        if args.mongo_uri:
+            try:
+                live_df = load_recent_labeled_live_rows(args.mongo_uri, args.db_name, limit=args.recent_live_rows)
+            except Exception:
+                live_df = pd.DataFrame()
+        if not live_df.empty and live_df["true_label"].nunique() >= 2:
+            X, y = prepare_live_retraining_frame(
+                live_df,
+                original_bundle["training_meta"],
+                numeric_threshold=args.numeric_threshold,
+            )
+            live_source_used = True
+            split_label = "live_recent_rows"
+        else:
+            X, y, _ = prepare_training_frame(
+                args.edge_csv,
+                keep_identity_payload=args.keep_identity_payload,
+                numeric_threshold=args.numeric_threshold,
+                sample_rows=args.sample_rows,
+                drop_duplicates=not args.keep_duplicates,
+            )
+            split_label = "dataset"
 
         ref_idx, drift_idx, eval_idx = contiguous_split(len(X), args.reference_fraction, args.drift_fraction)
         if not np.isclose(args.reference_fraction + args.drift_fraction + args.eval_fraction, 1.0, atol=0.01):
@@ -270,9 +370,9 @@ def train_command(args: argparse.Namespace) -> None:
             X_ref,
             X_drift,
             bundle=original_bundle,
-            mode="dataset",
-            reference_name="historical_reference_batch",
-            target_name="drift_retraining_batch",
+            mode="live" if live_source_used else "dataset",
+            reference_name="live_reference_batch" if live_source_used else "historical_reference_batch",
+            target_name="live_drift_retraining_batch" if live_source_used else "drift_retraining_batch",
             n_bins=10,
             min_category_count=args.min_category_count,
             numeric_threshold=args.numeric_threshold,
@@ -289,6 +389,7 @@ def train_command(args: argparse.Namespace) -> None:
             "drift_rows": int(len(X_drift)),
             "evaluation_rows": int(len(X_eval)),
             "split_strategy": "contiguous_60_20_20",
+            "retraining_source": split_label,
             "top_features": drift_summary["top_features"][:10],
             "dataset": str(args.edge_csv),
         }
@@ -348,6 +449,7 @@ def train_command(args: argparse.Namespace) -> None:
                     "reference_rows": int(len(X_ref)),
                     "drift_rows": int(len(X_drift)),
                     "evaluation_rows": int(len(X_eval)),
+                    "source": split_label,
                 },
                 "evaluation_metrics": retrained_metrics,
                 "evaluation_report": retrained_eval["classification_report"],
@@ -361,6 +463,25 @@ def train_command(args: argparse.Namespace) -> None:
         comparison = compare_metrics(original_metrics, retrained_metrics if retrained_metrics is not None else original_metrics)
         assessment = assess_change(comparison) if triggered and retrained_metrics is not None else "not_retrained"
 
+        pointer_updated = False
+        if retrained_bundle_path is not None and assessment != "hurt":
+            pointer = load_active_model_pointer(args.model_pointer_path) or {}
+            save_active_model_pointer(
+                args.model_pointer_path,
+                binary_model_path=retrained_bundle_path,
+                attack_model_path=pointer.get("attack_model_path"),
+                feature_contract_path=pointer.get("feature_contract_path"),
+                threshold_path=retrained_bundle_path.with_suffix(".metadata.json"),
+                multiclass_threshold_path=pointer.get("multiclass_threshold_path"),
+                version=str(retrained_bundle.get("model_version") if retrained_bundle else None),
+                extra={
+                    "kind": "active_model_pointer",
+                    "updated_by": "adaptive_retrain",
+                    "retraining_assessment": assessment,
+                },
+            )
+            pointer_updated = True
+
         comparison_path = report_dir / "edge_iiot_retrain_comparison.csv"
         comparison.to_csv(comparison_path, index=False)
         comparison_json_path = report_dir / "edge_iiot_retrain_comparison.json"
@@ -372,9 +493,11 @@ def train_command(args: argparse.Namespace) -> None:
                         "trigger_reason": trigger_reason,
                         "severity": drift_summary["severity"],
                         "assessment": assessment,
+                        "pointer_updated": pointer_updated,
                         "original_metrics": original_metrics,
                         "retrained_metrics": retrained_metrics,
                         "comparison": comparison.to_dict(orient="records"),
+                        "retraining_source": split_label,
                     }
                 ),
                 fh,
@@ -388,6 +511,29 @@ def train_command(args: argparse.Namespace) -> None:
             assessment=assessment,
             retrained_bundle_path=retrained_bundle_path,
         )
+
+        if args.mongo_uri:
+            try:
+                db = connect_database(args.mongo_uri, args.db_name)
+                ensure_doc = {
+                    "kind": "offline_retrain_result",
+                    "source": "adaptive_retrain",
+                    "created_at": datetime.now(timezone.utc),
+                    "triggered": bool(triggered),
+                    "trigger_reason": trigger_reason,
+                    "severity": drift_summary["severity"],
+                    "assessment": assessment,
+                    "pointer_updated": pointer_updated,
+                    "retraining_source": split_label,
+                    "original_metrics": original_metrics,
+                    "retrained_metrics": retrained_metrics,
+                    "comparison": comparison.to_dict(orient="records"),
+                    "model_path": str(retrained_bundle_path) if retrained_bundle_path else None,
+                    "pointer_path": str(args.model_pointer_path),
+                }
+                insert_documents(db[RETRAIN_EVENTS_COLLECTION], [ensure_doc])
+            except Exception:
+                pass
 
         print("Adaptive retraining complete.")
         print(f"Triggered         : {triggered}")
@@ -428,6 +574,10 @@ def main() -> None:
     train_parser.add_argument("--keep_identity_payload", action="store_true")
     train_parser.add_argument("--random_state", type=int, default=42)
     train_parser.add_argument("--threshold", type=float, default=None)
+    train_parser.add_argument("--mongo_uri", default=None)
+    train_parser.add_argument("--db_name", default="edge_iiot_paper")
+    train_parser.add_argument("--recent_live_rows", type=int, default=DEFAULT_RECENT_LIVE_ROWS)
+    train_parser.add_argument("--model_pointer_path", default=str(DEFAULT_MODEL_POINTER_PATH))
     train_parser.set_defaults(func=train_command)
 
     args = parser.parse_args()

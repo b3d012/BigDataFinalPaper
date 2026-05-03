@@ -14,11 +14,15 @@ from streamlit_autorefresh import st_autorefresh
 
 from edge_iiot_mongo import (
     ANALYSIS_SUMMARIES_COLLECTION,
+    ALERT_EXPLANATIONS_COLLECTION,
+    ADVERSARIAL_EVALUATIONS_COLLECTION,
     DEFAULT_MONGO_DB,
     DEFAULT_MONGO_URI,
+    DRIFT_EVENTS_COLLECTION,
     FEATURE_IMPORTANCE_COLLECTION,
     LIVE_WINDOWS_COLLECTION,
     PREDICTIONS_COLLECTION,
+    RETRAIN_EVENTS_COLLECTION,
     THRESHOLD_METRICS_COLLECTION,
     collection_counts,
     clear_live_collections,
@@ -27,7 +31,9 @@ from edge_iiot_mongo import (
     upsert_documents,
 )
 from edge_iiot_experiment import evaluation_from_predictions
+from edge_iiot_demo_replay import find_tshark, validate_tshark_interface
 from edge_iiot_thresholds import build_threshold_grid, compute_threshold_metrics, select_recommendations
+from edge_iiot_runtime import DEFAULT_ACTIVE_MODEL_POINTER_PATH
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -37,6 +43,13 @@ FIGURE_DIR = REPO_ROOT / "output" / "figures"
 LIVE_WORKER = REPO_ROOT / "src" / "edge_iiot_live_capture.py"
 LIVE_INBOX_DIR = REPO_ROOT / "output" / "live" / "inbox"
 LIVE_PROCESSED_DIR = REPO_ROOT / "output" / "live" / "processed"
+
+
+def resolve_live_model_reference() -> Path:
+    pointer_path = DEFAULT_ACTIVE_MODEL_POINTER_PATH
+    if pointer_path.exists():
+        return pointer_path
+    return REPO_ROOT / "models" / "edge_iiot_xgb_model.joblib"
 
 
 CLASSIFIER_SOURCE_DEFAULTS = ["holdout", "cv", "demo", "live"]
@@ -456,6 +469,101 @@ def load_live_prediction_frame(
 
 
 @st.cache_data(show_spinner=False, ttl=5)
+def load_live_alert_frame(
+    mongo_uri: str,
+    db_name: str,
+    *,
+    window_id: int | None = None,
+    limit: int = 250,
+) -> pd.DataFrame:
+    try:
+        db = connect_database(mongo_uri, db_name)
+        query = {"kind": "live_alert_explanation"}
+        if window_id is not None:
+            query["window_id"] = window_id
+        df = collection_to_dataframe(
+            db[ALERT_EXPLANATIONS_COLLECTION],
+            query=query,
+            projection={"_id": 0},
+            sort=[("window_id", -1), ("record_index", 1), ("created_at", -1)],
+            limit=limit,
+        )
+        if not df.empty:
+            return df
+    except Exception:
+        pass
+    return pd.DataFrame()
+
+
+@st.cache_data(show_spinner=False, ttl=5)
+def load_drift_event_frame(
+    mongo_uri: str,
+    db_name: str,
+    *,
+    limit: int = 250,
+) -> pd.DataFrame:
+    try:
+        db = connect_database(mongo_uri, db_name)
+        df = collection_to_dataframe(
+            db[DRIFT_EVENTS_COLLECTION],
+            query={"kind": "live_drift_event"},
+            projection={"_id": 0},
+            sort=[("created_at", -1), ("window_id", -1)],
+            limit=limit,
+        )
+        if not df.empty:
+            return df
+    except Exception:
+        pass
+    return pd.DataFrame()
+
+
+@st.cache_data(show_spinner=False, ttl=5)
+def load_retrain_event_frame(
+    mongo_uri: str,
+    db_name: str,
+    *,
+    limit: int = 100,
+) -> pd.DataFrame:
+    try:
+        db = connect_database(mongo_uri, db_name)
+        df = collection_to_dataframe(
+            db[RETRAIN_EVENTS_COLLECTION],
+            query={"kind": {"$in": ["live_retrain_request", "live_retrain_result", "offline_retrain_result"]}},
+            projection={"_id": 0},
+            sort=[("created_at", -1), ("window_id", -1)],
+            limit=limit,
+        )
+        if not df.empty:
+            return df
+    except Exception:
+        pass
+    return pd.DataFrame()
+
+
+@st.cache_data(show_spinner=False, ttl=5)
+def load_adversarial_frame(
+    mongo_uri: str,
+    db_name: str,
+    *,
+    limit: int = 100,
+) -> pd.DataFrame:
+    try:
+        db = connect_database(mongo_uri, db_name)
+        df = collection_to_dataframe(
+            db[ADVERSARIAL_EVALUATIONS_COLLECTION],
+            projection={"_id": 0},
+            sort=[("created_at", -1)],
+            limit=limit,
+        )
+        if not df.empty:
+            return df
+    except Exception:
+        pass
+    return pd.DataFrame()
+
+
+@st.cache_data(show_spinner=False, ttl=5)
 def load_live_shap_frame(
     mongo_uri: str,
     db_name: str,
@@ -503,6 +611,8 @@ def build_live_command(
     db_name: str,
     interface: str,
     tshark: str,
+    model_path: str,
+    model_pointer_path: str,
     window_seconds: int,
     packet_count: int | None,
     capture_filter: str | None,
@@ -516,6 +626,7 @@ def build_live_command(
     no_metadata: bool,
     max_windows: int,
     pause_seconds: float,
+    auto_retrain: bool,
     output_dir: str,
     capture_dir: str,
     injection_dir: str,
@@ -526,6 +637,10 @@ def build_live_command(
         sys.executable,
         str(LIVE_WORKER),
         "live",
+        "--model_path",
+        model_path,
+        "--model_pointer_path",
+        model_pointer_path,
         "--interface",
         interface,
         "--tshark",
@@ -571,7 +686,21 @@ def build_live_command(
         command.extend(["--threshold", str(threshold)])
     if no_metadata:
         command.append("--no_metadata")
+    if auto_retrain:
+        command.append("--auto_retrain")
     return command
+
+
+def preflight_live_capture(interface: str, tshark_path: str) -> tuple[bool, str, str | None]:
+    try:
+        resolved_tshark = find_tshark(tshark_path)
+    except Exception as exc:
+        return False, f"Invalid tshark path: {exc}", None
+
+    ok, message = validate_tshark_interface(resolved_tshark, interface)
+    if not ok:
+        return False, message, resolved_tshark
+    return True, "", resolved_tshark
 
 
 def start_live_capture(command: list[str]) -> None:
@@ -619,26 +748,51 @@ def save_uploaded_pcaps(uploaded_files, queue_dir: Path) -> list[Path]:
     return saved_paths
 
 
-def clear_directory_files(folder: Path) -> int:
+def _unlink_with_retry(path: Path, *, attempts: int = 3, delay_seconds: float = 0.25) -> bool:
+    for attempt in range(attempts):
+        try:
+            path.unlink()
+            return True
+        except FileNotFoundError:
+            return True
+        except PermissionError:
+            if attempt + 1 < attempts:
+                time.sleep(delay_seconds * (attempt + 1))
+                continue
+            return False
+        except OSError:
+            return False
+    return False
+
+
+def clear_directory_files(folder: Path) -> dict[str, object]:
     if not folder.exists():
-        return 0
+        return {"deleted": 0, "skipped": []}
     deleted = 0
+    skipped: list[str] = []
     for path in folder.iterdir():
         if path.is_file():
-            path.unlink(missing_ok=True)
-            deleted += 1
+            if _unlink_with_retry(path):
+                deleted += 1
+            else:
+                skipped.append(str(path))
         elif path.is_dir():
-            shutil.rmtree(path, ignore_errors=True)
-            deleted += 1
-    return deleted
+            try:
+                shutil.rmtree(path, ignore_errors=False)
+            except Exception:
+                skipped.append(str(path))
+            else:
+                deleted += 1
+    return {"deleted": deleted, "skipped": skipped}
 
 
 def reset_live_environment(mongo_uri: str, db_name: str) -> dict[str, object]:
     files_deleted = 0
+    skipped_files: list[str] = []
     mongo_deleted: dict[str, int] = {}
     if live_running():
         stop_live_capture()
-        time.sleep(1)
+        time.sleep(3)
     try:
         db = connect_database(mongo_uri, db_name)
         mongo_deleted = clear_live_collections(db)
@@ -647,12 +801,16 @@ def reset_live_environment(mongo_uri: str, db_name: str) -> dict[str, object]:
 
     live_root = REPO_ROOT / "output" / "live"
     for folder in [LIVE_INBOX_DIR, LIVE_PROCESSED_DIR, live_root / "captures"]:
-        files_deleted += clear_directory_files(folder)
+        cleanup = clear_directory_files(folder)
+        files_deleted += int(cleanup.get("deleted", 0))
+        skipped_files.extend([str(path) for path in cleanup.get("skipped", [])])
 
     status_path = live_root / "live_capture_status.json"
     if status_path.exists():
-        status_path.unlink(missing_ok=True)
-        files_deleted += 1
+        if _unlink_with_retry(status_path, attempts=4, delay_seconds=0.5):
+            files_deleted += 1
+        else:
+            skipped_files.append(str(status_path))
 
     st.session_state["live_proc"] = None
     st.session_state["live_command"] = None
@@ -662,6 +820,8 @@ def reset_live_environment(mongo_uri: str, db_name: str) -> dict[str, object]:
     return {
         "mongo_deleted": mongo_deleted,
         "files_deleted": files_deleted,
+        "files_skipped": len(skipped_files),
+        "skipped_files": skipped_files,
         "reset_at": pd.Timestamp.now(tz="UTC").isoformat(),
     }
 
@@ -826,6 +986,10 @@ def render_predictions(mongo_uri: str, db_name: str) -> None:
                     "pred_proba_attack",
                     "pred_label",
                     "pred_label_name",
+                    "attack_type_name",
+                    "attack_type_proba",
+                    "model_version",
+                    "attack_model_version",
                     "correct",
                     "anomaly_score",
                     "anomaly_pred_label",
@@ -892,6 +1056,86 @@ def render_feature_importance(mongo_uri: str, db_name: str) -> None:
             st.plotly_chart(fig, use_container_width=True)
             with st.expander(f"{short_name} rows", expanded=False):
                 st.dataframe(top_df, use_container_width=True, height=280)
+
+
+def render_alert_explanations(mongo_uri: str, db_name: str) -> None:
+    st.subheader("Alert Explanations")
+    window_id = st.number_input("Window id", min_value=0, max_value=1_000_000, value=0, step=1)
+    limit = st.slider("Rows to display", 10, 500, 100, step=10)
+    df = load_live_alert_frame(mongo_uri, db_name, window_id=int(window_id) if window_id > 0 else None, limit=limit)
+    if df.empty:
+        st.info("No live alert explanation rows available yet.")
+        return
+    cols = st.columns(4)
+    cols[0].metric("Rows", len(df))
+    cols[1].metric("Windows", int(df["window_id"].nunique()) if "window_id" in df.columns else 0)
+    cols[2].metric("Pred attack", int((df.get("pred_label", 0) == 1).sum()) if "pred_label" in df.columns else 0)
+    cols[3].metric("Model versions", int(df["model_version"].nunique()) if "model_version" in df.columns else 0)
+    display_cols = [
+        column
+        for column in [
+            "window_id",
+            "record_index",
+            "prediction_id",
+            "pred_label_name",
+            "pred_proba_attack",
+            "attack_type_name",
+            "attack_type_proba",
+            "model_version",
+            "attack_model_version",
+            "top_features",
+        ]
+        if column in df.columns
+    ]
+    st.dataframe(df[display_cols] if display_cols else df, use_container_width=True, height=360)
+
+
+def render_drift_and_retraining(mongo_uri: str, db_name: str) -> None:
+    st.subheader("Drift and Retraining")
+    left, right = st.columns(2)
+    with left:
+        drift_df = load_drift_event_frame(mongo_uri, db_name)
+        if drift_df.empty:
+            st.info("No ADWIN drift events recorded yet.")
+        else:
+            st.metric("Drift events", len(drift_df))
+            st.metric("Latest confidence", f"{float(drift_df['confidence'].iloc[0]):.4f}" if "confidence" in drift_df.columns else "n/a")
+            st.dataframe(
+                drift_df[[col for col in ["created_at", "window_id", "record_index", "confidence", "drift_count", "running_mean", "running_std"] if col in drift_df.columns]],
+                use_container_width=True,
+                height=260,
+            )
+    with right:
+        retrain_df = load_retrain_event_frame(mongo_uri, db_name)
+        if retrain_df.empty:
+            st.info("No retraining events recorded yet.")
+        else:
+            st.metric("Retrain events", len(retrain_df))
+            st.metric("Latest result", str(retrain_df["kind"].iloc[0]) if "kind" in retrain_df.columns else "n/a")
+            st.dataframe(
+                retrain_df[[col for col in ["created_at", "kind", "window_id", "reason", "exit_code", "accepted", "assessment"] if col in retrain_df.columns]],
+                use_container_width=True,
+                height=260,
+            )
+
+
+def render_robustness(mongo_uri: str, db_name: str) -> None:
+    st.subheader("Robustness")
+    df = load_adversarial_frame(mongo_uri, db_name)
+    if df.empty:
+        st.info("No adversarial robustness report found yet.")
+        return
+    cols = st.columns(4)
+    record = df.iloc[0].to_dict()
+    payload = record.get("payload", record) or {}
+    clean = payload.get("clean_metrics", {}) or {}
+    fgsm = payload.get("fgsm_metrics", {}) or {}
+    pgd = payload.get("pgd_metrics", {}) or {}
+    cols[0].metric("Rows", len(df))
+    cols[1].metric("Clean recall", f"{float(clean.get('attack_recall', 0.0)):.4f}")
+    cols[2].metric("FGSM recall", f"{float(fgsm.get('attack_recall', 0.0)):.4f}")
+    cols[3].metric("PGD recall", f"{float(pgd.get('attack_recall', 0.0)):.4f}")
+    st.json(payload)
 
 
 def render_thresholds(mongo_uri: str, db_name: str) -> None:
@@ -961,11 +1205,19 @@ def render_live_capture(mongo_uri: str, db_name: str) -> None:
     reset_notice = st.session_state.pop("live_reset_notice", None)
     if reset_notice:
         st.success(reset_notice)
+        skipped_files = st.session_state.pop("live_reset_skipped_files", None)
+        if skipped_files:
+            with st.expander("Skipped locked files", expanded=False):
+                st.write(skipped_files)
 
     left, right = st.columns(2)
     with left:
         interface = st.text_input("Interface / source", value=st.session_state.get("live_interface", ""))
         tshark_path = st.text_input("tshark path", value=st.session_state.get("live_tshark", "tshark"))
+        model_path = st.text_input(
+            "Active model pointer",
+            value=st.session_state.get("live_model_path", str(resolve_live_model_reference())),
+        )
         window_seconds = st.slider("Capture window seconds", 5, 120, int(st.session_state.get("live_window_seconds", 30)), step=5)
         packet_count = st.number_input("Packet count per window (0 = disabled)", min_value=0, max_value=50000, value=int(st.session_state.get("live_packet_count", 0)), step=10)
         capture_filter = st.text_input("Capture filter", value=st.session_state.get("live_capture_filter", ""))
@@ -980,9 +1232,11 @@ def render_live_capture(mongo_uri: str, db_name: str) -> None:
         shap_top_n = st.number_input("SHAP top features", min_value=1, max_value=50, value=int(st.session_state.get("live_shap_top_n", 15)), step=1)
         pause_seconds = st.number_input("Pause between windows", min_value=0.0, max_value=60.0, value=float(st.session_state.get("live_pause_seconds", 0.0)), step=0.5)
         max_windows = st.number_input("Max windows (0 = continuous)", min_value=0, max_value=100000, value=int(st.session_state.get("live_max_windows", 0)), step=1)
+        auto_retrain = st.checkbox("Auto retrain on drift", value=bool(st.session_state.get("live_auto_retrain", False)))
 
     st.session_state["live_interface"] = interface
     st.session_state["live_tshark"] = tshark_path
+    st.session_state["live_model_path"] = model_path
     st.session_state["live_window_seconds"] = window_seconds
     st.session_state["live_packet_count"] = int(packet_count)
     st.session_state["live_capture_filter"] = capture_filter
@@ -996,6 +1250,10 @@ def render_live_capture(mongo_uri: str, db_name: str) -> None:
     st.session_state["live_shap_top_n"] = int(shap_top_n)
     st.session_state["live_pause_seconds"] = float(pause_seconds)
     st.session_state["live_max_windows"] = int(max_windows)
+    st.session_state["live_auto_retrain"] = bool(auto_retrain)
+    start_error = st.session_state.pop("live_start_error", None)
+    if start_error:
+        st.error(start_error)
 
     action_cols = st.columns(4)
     with action_cols[0]:
@@ -1005,41 +1263,56 @@ def render_live_capture(mongo_uri: str, db_name: str) -> None:
             elif live_running():
                 st.warning("Live capture is already running.")
             else:
-                reset_result = reset_live_environment(mongo_uri, db_name)
-                st.cache_data.clear()
-                command = build_live_command(
-                    mongo_uri=mongo_uri,
-                    db_name=db_name,
-                    interface=interface.strip(),
-                    tshark=tshark_path.strip(),
-                    window_seconds=window_seconds,
-                    packet_count=int(packet_count) if int(packet_count) > 0 else None,
-                    capture_filter=capture_filter.strip() or None,
-                    display_filter=display_filter.strip() or None,
-                    threshold=threshold,
-                    file_max_threshold=file_max_threshold,
-                    file_ratio_threshold=file_ratio_threshold,
-                    min_records=int(min_records),
-                    shap_sample_rows=int(shap_sample_rows),
-                    shap_top_n=int(shap_top_n),
-                    no_metadata=False,
-                    max_windows=int(max_windows),
-                    pause_seconds=float(pause_seconds),
-                    output_dir=str(REPO_ROOT / "output" / "live"),
-                    capture_dir=str(REPO_ROOT / "output" / "live" / "captures"),
-                    injection_dir=str(LIVE_INBOX_DIR),
-                    processed_dir=str(LIVE_PROCESSED_DIR),
-                    status_path=str(REPO_ROOT / "output" / "live" / "live_capture_status.json"),
-                )
-                try:
-                    start_live_capture(command)
-                    st.success(
-                        "Fresh live session started."
-                        + f" Cleared Mongo docs={sum(reset_result['mongo_deleted'].values())},"
-                        + f" files={reset_result['files_deleted']}."
+                ok, message, resolved_tshark = preflight_live_capture(interface.strip(), tshark_path.strip())
+                if not ok or resolved_tshark is None:
+                    st.session_state["live_start_error"] = message
+                    st.error(message)
+                else:
+                    reset_result = reset_live_environment(mongo_uri, db_name)
+                    st.cache_data.clear()
+                    command = build_live_command(
+                        mongo_uri=mongo_uri,
+                        db_name=db_name,
+                        interface=interface.strip(),
+                        tshark=resolved_tshark,
+                        model_path=model_path.strip(),
+                        model_pointer_path=model_path.strip(),
+                        window_seconds=window_seconds,
+                        packet_count=int(packet_count) if int(packet_count) > 0 else None,
+                        capture_filter=capture_filter.strip() or None,
+                        display_filter=display_filter.strip() or None,
+                        threshold=threshold,
+                        file_max_threshold=file_max_threshold,
+                        file_ratio_threshold=file_ratio_threshold,
+                        min_records=int(min_records),
+                        shap_sample_rows=int(shap_sample_rows),
+                        shap_top_n=int(shap_top_n),
+                        no_metadata=False,
+                        max_windows=int(max_windows),
+                        pause_seconds=float(pause_seconds),
+                        auto_retrain=auto_retrain,
+                        output_dir=str(REPO_ROOT / "output" / "live"),
+                        capture_dir=str(REPO_ROOT / "output" / "live" / "captures"),
+                        injection_dir=str(LIVE_INBOX_DIR),
+                        processed_dir=str(LIVE_PROCESSED_DIR),
+                        status_path=str(REPO_ROOT / "output" / "live" / "live_capture_status.json"),
                     )
-                except Exception as exc:
-                    st.error(f"Failed to start live capture: {exc}")
+                    try:
+                        start_live_capture(command)
+                        skipped_files = reset_result.get("skipped_files", [])
+                        msg = (
+                            "Fresh live session started."
+                            + f" Cleared Mongo docs={sum(reset_result['mongo_deleted'].values())},"
+                            + f" files={reset_result['files_deleted']}."
+                        )
+                        if skipped_files:
+                            msg += f" Skipped locked files={len(skipped_files)}."
+                        st.success(msg)
+                        if skipped_files:
+                            with st.expander("Skipped files", expanded=False):
+                                st.write(skipped_files)
+                    except Exception as exc:
+                        st.error(f"Failed to start live capture: {exc}")
     with action_cols[1]:
         if st.button("Stop Capture", use_container_width=True):
             stop_live_capture()
@@ -1054,6 +1327,9 @@ def render_live_capture(mongo_uri: str, db_name: str) -> None:
                 "Live data reset completed. "
                 f"Mongo cleared: {result['mongo_deleted']}, files deleted: {result['files_deleted']}"
             )
+            if result.get("files_skipped", 0):
+                st.session_state["live_reset_notice"] += f", skipped: {result['files_skipped']}"
+                st.session_state["live_reset_skipped_files"] = result.get("skipped_files", [])
             st.rerun()
 
     st.markdown("**PCAP injection**")
@@ -1272,6 +1548,12 @@ def main() -> None:
     render_thresholds(mongo_uri, db_name)
     st.divider()
     render_analysis_tabs(mongo_uri, db_name)
+    st.divider()
+    render_alert_explanations(mongo_uri, db_name)
+    st.divider()
+    render_drift_and_retraining(mongo_uri, db_name)
+    st.divider()
+    render_robustness(mongo_uri, db_name)
 
     with st.expander("MongoDB setup notes"):
         st.write(
@@ -1283,9 +1565,13 @@ def main() -> None:
                     "raw_packets",
                     "feature_vectors",
                     "predictions",
+                    "alert_explanations",
                     "live_windows",
                     "feature_importance",
                     "threshold_metrics",
+                    "drift_events",
+                    "retrain_events",
+                    "adversarial_evaluations",
                     "analysis_summaries",
                 ],
             }

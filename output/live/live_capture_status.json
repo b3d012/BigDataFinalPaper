@@ -1,0 +1,22 @@
+{
+  "state": "running",
+  "started_at": "2026-04-23T12:07:43.701885+00:00",
+  "interface": "bogus",
+  "tshark": "C:\\Program Files\\Wireshark\\tshark.exe",
+  "window_seconds": 1,
+  "packet_count": 1,
+  "mongo_uri": "mongodb://localhost:27017",
+  "db_name": "edge_iiot_paper",
+  "pid": 17112,
+  "injection_dir": "C:\\Users\\abdul\\Desktop\\BigDataFinalPaper\\output\\live\\inbox",
+  "live_anomaly_enabled": true,
+  "live_drift_enabled": false,
+  "model_path": "models\\edge_iiot_active_model.json",
+  "model_version": "binary",
+  "attack_model_version": "binary",
+  "adwin_delta": 0.002,
+  "auto_retrain": false,
+  "last_window_id": 0,
+  "updated_at": "2026-04-23T20:30:52.345098+00:00",
+  "last_error": "Capturing on 'bogus'\ntshark: The capture session could not be initiated on capture device \"bogus\".\n(Error opening adapter: The filename, directory name, or volume label syntax is incorrect.  (123))\nPlease check that you have the proper interface or pipe specified.\n0 packets captured"
+}

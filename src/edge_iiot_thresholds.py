@@ -11,6 +11,7 @@ import pandas as pd
 from sklearn.metrics import accuracy_score, average_precision_score, confusion_matrix, roc_auc_score
 
 from edge_iiot_experiment import DEFAULT_REPORT_DIR
+from edge_iiot_multiclass import calibrate_multiclass_thresholds
 
 
 DEFAULT_FIGURE_DIR = Path("output/figures")
@@ -270,6 +271,7 @@ def write_summary_markdown(
     *,
     holdout_recs: dict[str, object],
     cv_recs: dict[str, object] | None,
+    multiclass_recs: dict[str, object] | None,
     output_path: Path,
 ) -> None:
     holdout_recommendations = holdout_recs["recommendations"]
@@ -300,6 +302,18 @@ def write_summary_markdown(
                 f"- Max F2 threshold: {cv_recommendations['recommended']['max_f2']['threshold']:.2f}",
                 f"- Best recall under precision constraint: {cv_recommendations['recommended']['highest_recall_under_min_precision']['threshold']:.2f}",
                 f"- Lowest FNR under precision constraint: {cv_recommendations['recommended']['lowest_fnr_under_min_precision']['threshold']:.2f}",
+                "",
+            ]
+        )
+
+    if multiclass_recs is not None:
+        lines.extend(
+            [
+                "## Multiclass",
+                f"- Source: {multiclass_recs['source']}",
+                f"- Output CSV: {multiclass_recs['output_csv']}",
+                f"- Critical classes: {', '.join(multiclass_recs.get('critical_classes', [])) or 'n/a'}",
+                f"- Minimum precision: {float(multiclass_recs.get('min_precision', 0.0)):.2f}",
                 "",
             ]
         )
@@ -376,12 +390,65 @@ def calibrate_dataset(
     }
 
 
+def load_multiclass_prediction_frame(path: Path) -> pd.DataFrame:
+    if not path.exists():
+        raise FileNotFoundError(f"Multiclass prediction file not found: {path}")
+    df = pd.read_csv(path, low_memory=False)
+    required = {"true_label_index", "pred_label_index", "true_label_name", "pred_label_name"}
+    missing = required - set(df.columns)
+    if missing:
+        raise ValueError(f"Multiclass prediction file {path} is missing required columns: {sorted(missing)}")
+    df = df.copy()
+    for column in ["true_label_index", "pred_label_index"]:
+        df[column] = pd.to_numeric(df[column], errors="raise").astype(int)
+    return df
+
+
+def calibrate_multiclass_dataset(
+    *,
+    predictions_path: Path,
+    output_path: Path,
+    default_threshold: float = 0.5,
+    min_precision: float = 0.97,
+    critical_classes: list[str] | None = None,
+) -> dict[str, object]:
+    df = load_multiclass_prediction_frame(predictions_path)
+    class_columns = sorted([column[len("proba_") :] for column in df.columns if column.startswith("proba_")])
+    if not class_columns:
+        raise ValueError(f"No per-class probability columns found in {predictions_path}.")
+    proba = np.column_stack([pd.to_numeric(df[f"proba_{cls}"], errors="coerce").fillna(0.0).to_numpy() for cls in class_columns])
+    y_true = df["true_label_index"].astype(int)
+    thresholds = calibrate_multiclass_thresholds(
+        y_true,
+        proba,
+        class_columns,
+        default_threshold=default_threshold,
+        min_precision=min_precision,
+        critical_classes=critical_classes or [],
+    )
+    table = thresholds["table"].copy()
+    table.to_csv(output_path.with_suffix(".csv"), index=False)
+    payload = {
+        "source": str(predictions_path),
+        "output_csv": str(output_path.with_suffix(".csv")),
+        "default_threshold": float(default_threshold),
+        "min_precision": float(min_precision),
+        "critical_classes": critical_classes or [],
+        "thresholds": thresholds["per_class"],
+    }
+    with output_path.open("w", encoding="utf-8") as fh:
+        json.dump(payload, fh, indent=2)
+    return payload
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Threshold calibration for the offline Edge-IIoT binary IDS."
+        description="Threshold calibration for the offline Edge-IIoT IDS."
     )
     parser.add_argument("--holdout_predictions", default=str(DEFAULT_HOLDOUT_PREDICTIONS))
     parser.add_argument("--cv_predictions", default=str(DEFAULT_CV_PREDICTIONS))
+    parser.add_argument("--multiclass_predictions", default=None)
+    parser.add_argument("--multiclass_output", default="output/reports/edge_iiot_multiclass_thresholds.json")
     parser.add_argument("--output_report_dir", default=str(DEFAULT_REPORT_DIR))
     parser.add_argument("--output_fig_dir", default=str(DEFAULT_FIGURE_DIR))
     parser.add_argument("--threshold_min", type=float, default=0.05)
@@ -389,6 +456,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--threshold_step", type=float, default=0.01)
     parser.add_argument("--min_precision", type=float, default=0.97)
     parser.add_argument("--default_threshold", type=float, default=0.5)
+    parser.add_argument(
+        "--critical_classes",
+        nargs="*",
+        default=["Ransomware", "MITM", "DDoS_HTTP", "DDoS_TCP", "DDoS_UDP", "DDoS_ICMP"],
+    )
     parser.add_argument("--skip_cv", action="store_true", help="Only calibrate the holdout predictions.")
     return parser
 
@@ -436,10 +508,21 @@ def main() -> None:
             else:
                 print(f"CV predictions file not found, skipping CV calibration: {cv_path}")
 
+        multiclass_result = None
+        if args.multiclass_predictions:
+            multiclass_result = calibrate_multiclass_dataset(
+                predictions_path=Path(args.multiclass_predictions),
+                output_path=Path(args.multiclass_output),
+                default_threshold=args.default_threshold,
+                min_precision=args.min_precision,
+                critical_classes=list(args.critical_classes),
+            )
+
         summary_path = report_dir / "edge_iiot_threshold_calibration_summary.md"
         write_summary_markdown(
             holdout_recs=holdout_result,
             cv_recs=cv_result,
+            multiclass_recs=multiclass_result,
             output_path=summary_path,
         )
 
@@ -453,6 +536,9 @@ def main() -> None:
             print(f"CV recommendations   : {cv_result['recommendations_output']}")
             print(f"CV figures           : {cv_result['precision_recall_figure']}")
             print(f"                     : {cv_result['fnr_figure']}")
+        if multiclass_result:
+            print(f"Multiclass thresholds: {multiclass_result['output_csv']}")
+            print(f"Multiclass summary   : {args.multiclass_output}")
         print(f"Summary markdown     : {summary_path}")
         print(f"Runtime seconds      : {time.perf_counter() - started:.3f}")
 

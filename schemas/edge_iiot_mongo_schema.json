@@ -1,0 +1,49 @@
+{
+  "database": "edge_iiot_paper",
+  "collections": {
+    "raw_packets": {
+      "description": "Captured packet rows before feature transformation.",
+      "key_fields": ["kind", "source_file", "record_index"]
+    },
+    "feature_vectors": {
+      "description": "Transformed model input rows for scoring and retraining.",
+      "key_fields": ["kind", "source_file", "record_index"]
+    },
+    "predictions": {
+      "description": "Binary and multiclass predictions for live and offline windows.",
+      "key_fields": ["kind", "source", "source_file", "record_index"]
+    },
+    "alert_explanations": {
+      "description": "Per-alert SHAP explanations and top contributing features.",
+      "key_fields": ["kind", "source", "source_file", "window_id", "record_index"]
+    },
+    "live_windows": {
+      "description": "Window-level live summary rows, including SHAP and drift metadata.",
+      "key_fields": ["kind", "source_file", "window_id"]
+    },
+    "feature_importance": {
+      "description": "Global SHAP, live SHAP, and live drift feature importance rows.",
+      "key_fields": ["importance_type", "source", "feature"]
+    },
+    "threshold_metrics": {
+      "description": "Threshold sweeps and recommendation metrics for binary or live calibration.",
+      "key_fields": ["kind", "source", "threshold"]
+    },
+    "drift_events": {
+      "description": "ADWIN drift detections over prediction confidence micro-batches.",
+      "key_fields": ["kind", "source", "window_id", "record_index", "created_at"]
+    },
+    "retrain_events": {
+      "description": "Retraining requests and retraining results with acceptance metadata.",
+      "key_fields": ["kind", "source", "created_at"]
+    },
+    "adversarial_evaluations": {
+      "description": "FGSM / PGD robustness reports and anomaly detector comparisons.",
+      "key_fields": ["kind", "source", "created_at"]
+    },
+    "analysis_summaries": {
+      "description": "Materialized report summaries and feature contract metadata.",
+      "key_fields": ["kind", "artifact_path"]
+    }
+  }
+}

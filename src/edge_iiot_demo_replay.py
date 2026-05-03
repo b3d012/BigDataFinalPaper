@@ -94,6 +94,50 @@ def available_tshark_fields(tshark: str) -> set[str] | None:
     return fields
 
 
+def available_tshark_interfaces(tshark: str) -> list[str]:
+    try:
+        output = run_text([tshark, "-D"])
+    except Exception:
+        return []
+    interfaces: list[str] = []
+    for line in output.splitlines():
+        cleaned = line.strip()
+        if cleaned:
+            interfaces.append(cleaned)
+    return interfaces
+
+
+def validate_tshark_interface(tshark: str, interface: str) -> tuple[bool, str]:
+    candidate = str(interface).strip()
+    if not candidate:
+        return False, "Interface is empty."
+
+    interfaces = available_tshark_interfaces(tshark)
+    if not interfaces:
+        return False, "Unable to enumerate tshark interfaces."
+
+    if candidate.isdigit():
+        idx = int(candidate)
+        if 1 <= idx <= len(interfaces):
+            return True, ""
+
+    normalized = candidate.lower()
+    for line in interfaces:
+        line_lower = line.lower()
+        if normalized == line_lower or normalized in line_lower:
+            return True, ""
+        if ". " in line:
+            label = line.split(". ", 1)[1].strip()
+            label_lower = label.lower()
+            if normalized == label_lower or normalized in label_lower:
+                return True, ""
+
+    preview = "; ".join(interfaces[:8])
+    if len(interfaces) > 8:
+        preview += "; ..."
+    return False, f"Interface '{candidate}' is not available. Available interfaces: {preview}"
+
+
 def pcap_files(folder: Path) -> list[Path]:
     if not folder.exists() or not folder.is_dir():
         raise FileNotFoundError(f"Demo folder not found: {folder}")

@@ -1,0 +1,129 @@
+{
+  "source_name": "output\\reports\\edge_iiot_holdout_predictions.csv",
+  "threshold_grid": {
+    "min": 0.05,
+    "max": 0.95,
+    "step": 0.01,
+    "count": 91
+  },
+  "default_threshold": {
+    "threshold": 0.5,
+    "accuracy": 0.9471940887954646,
+    "attack_precision": 0.989763779527559,
+    "attack_recall": 0.9473208229708343,
+    "attack_fnr": 0.052679177029165726,
+    "attack_f1": 0.9680773229614933,
+    "attack_f2": 0.955515689613038,
+    "tn": 4600,
+    "fp": 260,
+    "fn": 1398,
+    "tp": 25140
+  },
+  "min_precision_constraint": 0.97,
+  "precision_constraint_met": true,
+  "recommended": {
+    "max_f1": {
+      "threshold": 0.13,
+      "accuracy": 0.9756035416268553,
+      "attack_precision": 0.9723260758008944,
+      "attack_recall": 0.9995855000376818,
+      "attack_fnr": 0.00041449996231818524,
+      "attack_f1": 0.9857673727233945,
+      "attack_f2": 0.9940120209239989,
+      "tn": 4105,
+      "fp": 755,
+      "fn": 11,
+      "tp": 26527,
+      "delta_from_default": {
+        "attack_precision": -0.017437703726664644,
+        "attack_recall": 0.052264677066847454,
+        "attack_fnr": -0.052264677066847544,
+        "accuracy": 0.028409452831390625,
+        "attack_f1": 0.01769004976190125,
+        "attack_f2": 0.03849633131096086
+      },
+      "note": "Threshold with the highest F1 on the evaluated probabilities."
+    },
+    "max_f2": {
+      "threshold": 0.13,
+      "accuracy": 0.9756035416268553,
+      "attack_precision": 0.9723260758008944,
+      "attack_recall": 0.9995855000376818,
+      "attack_fnr": 0.00041449996231818524,
+      "attack_f1": 0.9857673727233945,
+      "attack_f2": 0.9940120209239989,
+      "tn": 4105,
+      "fp": 755,
+      "fn": 11,
+      "tp": 26527,
+      "delta_from_default": {
+        "attack_precision": -0.017437703726664644,
+        "attack_recall": 0.052264677066847454,
+        "attack_fnr": -0.052264677066847544,
+        "accuracy": 0.028409452831390625,
+        "attack_f1": 0.01769004976190125,
+        "attack_f2": 0.03849633131096086
+      },
+      "note": "Threshold with the highest F2 to emphasize recall."
+    },
+    "highest_recall_under_min_precision": {
+      "threshold": 0.13,
+      "accuracy": 0.9756035416268553,
+      "attack_precision": 0.9723260758008944,
+      "attack_recall": 0.9995855000376818,
+      "attack_fnr": 0.00041449996231818524,
+      "attack_f1": 0.9857673727233945,
+      "attack_f2": 0.9940120209239989,
+      "tn": 4105,
+      "fp": 755,
+      "fn": 11,
+      "tp": 26527,
+      "delta_from_default": {
+        "attack_precision": -0.017437703726664644,
+        "attack_recall": 0.052264677066847454,
+        "attack_fnr": -0.052264677066847544,
+        "accuracy": 0.028409452831390625,
+        "attack_f1": 0.01769004976190125,
+        "attack_f2": 0.03849633131096086
+      },
+      "note": "Best recall subject to the minimum precision constraint.",
+      "precision_constraint_met": true
+    },
+    "lowest_fnr_under_min_precision": {
+      "threshold": 0.05,
+      "accuracy": 0.975348748327919,
+      "attack_precision": 0.9720410406742397,
+      "attack_recall": 0.9995855000376818,
+      "attack_fnr": 0.00041449996231818524,
+      "attack_f1": 0.9856208664630506,
+      "attack_f2": 0.9939524287703485,
+      "tn": 4097,
+      "fp": 763,
+      "fn": 11,
+      "tp": 26527,
+      "delta_from_default": {
+        "attack_precision": -0.01772273885331932,
+        "attack_recall": 0.052264677066847454,
+        "attack_fnr": -0.052264677066847544,
+        "accuracy": 0.02815465953245433,
+        "attack_f1": 0.01754354350155729,
+        "attack_f2": 0.038436739157310496
+      },
+      "note": "Lowest FNR subject to the minimum precision constraint.",
+      "precision_constraint_met": true
+    }
+  },
+  "default_row_metrics": {
+    "threshold": 0.5,
+    "accuracy": 0.9471940887954646,
+    "attack_precision": 0.989763779527559,
+    "attack_recall": 0.9473208229708343,
+    "attack_fnr": 0.052679177029165726,
+    "attack_f1": 0.9680773229614933,
+    "attack_f2": 0.955515689613038,
+    "tn": 4600,
+    "fp": 260,
+    "fn": 1398,
+    "tp": 25140
+  }
+}
