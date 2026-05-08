@@ -873,6 +873,15 @@ def reset_live_environment(mongo_uri: str, db_name: str) -> dict[str, object]:
     }
 
 
+def sum_numeric_values(values) -> int:
+    total = 0
+    for value in values:
+        try:
+            total += int(value)
+        except (TypeError, ValueError):
+            continue
+    return total
+
 
 @st.cache_data(show_spinner=False, ttl=5)
 def load_summary_document(
@@ -1462,10 +1471,11 @@ def render_live_capture(mongo_uri: str, db_name: str) -> None:
                     try:
                         start_live_capture(command)
                         skipped_files = reset_result.get("skipped_files", [])
+                        mongo_deleted_count = sum_numeric_values(reset_result.get("mongo_deleted", {}).values())
                         msg = (
                             "Fresh live session started."
-                            + f" Cleared Mongo docs={sum(reset_result['mongo_deleted'].values())},"
-                            + f" files={reset_result['files_deleted']}."
+                            + f" Cleared Mongo docs={mongo_deleted_count},"
+                            + f" files={int(reset_result.get('files_deleted', 0))}."
                         )
                         if skipped_files:
                             msg += f" Skipped locked files={len(skipped_files)}."

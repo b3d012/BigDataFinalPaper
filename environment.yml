@@ -4,6 +4,8 @@ channels:
 dependencies:
   - python=3.11
   - pip
+  - tectonic
+  - pandoc
   - pip:
       - pandas
       - numpy

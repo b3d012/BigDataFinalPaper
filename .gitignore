@@ -1,10 +1,10 @@
-# Ignore everything by default
+# Ignore everything by default so GitHub stays small and professional.
 *
 
 # Keep folders explorable
 !*/
 
-# Keep top-level and nested source/docs/tests/schema files
+# Keep source, docs, tests, schemas, and lightweight metadata.
 !src/
 !src/**/*.py
 !docs/
@@ -22,8 +22,9 @@
 !output/demo/
 !output/demo/*.json
 !output/demo/*.md
-!output/live/
-!output/live/*.json
+
+# Do not publish local live-capture state, logs, datasets, PCAPs, model
+# binaries, generated figures, paper builds, caches, or IDE settings.
 
 # Keep Python source
 !*.py
@@ -48,3 +49,21 @@
 !README.md
 !*.md
 !*.txt
+
+# Explicit generated/local exclusions.
+.pytest_cache/
+.vscode/
+__pycache__/
+**/__pycache__/
+/data/
+/demo/
+/extrafigs/
+/output/live/
+/output/figures/
+*.aux
+*.log
+*.pdf
+*.docx
+models/*.joblib
+models/*.csv
+output/**/*.csv

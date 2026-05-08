@@ -1,7 +1,7 @@
 {
   "model_path": "models\\edge_iiot_attack_xgb_model.joblib",
-  "feature_contract_path": "C:\\Users\\abdul\\Desktop\\BigDataFinalPaper\\models\\edge_iiot_feature_contract.json",
-  "pointer_path": "C:\\Users\\abdul\\Desktop\\BigDataFinalPaper\\models\\edge_iiot_active_model.json",
+  "feature_contract_path": "models\\edge_iiot_feature_contract.json",
+  "pointer_path": "models\\edge_iiot_active_model.json",
   "preprocessing_seconds": 92.69503470000927,
   "training_meta": {
     "edge_csv": "data/ML-EdgeIIoT-dataset.csv",

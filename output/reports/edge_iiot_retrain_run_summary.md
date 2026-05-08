@@ -9,14 +9,14 @@
 - Split strategy: contiguous_60_20_20
 
 ## Before / After Metrics
-- roc_auc: original=0.993235, retrained=0.993235, delta=0.000000
-- pr_auc: original=0.998776, retrained=0.998776, delta=0.000000
-- attack_precision: original=0.991468, retrained=0.991468, delta=0.000000
+- roc_auc: original=0.999993, retrained=0.993235, delta=-0.006757
+- pr_auc: original=0.999999, retrained=0.998776, delta=-0.001224
+- attack_precision: original=0.993467, retrained=0.991468, delta=-0.001998
 - attack_recall: original=1.000000, retrained=1.000000, delta=0.000000
-- normal_recall: original=0.912424, retrained=0.912424, delta=0.000000
-- macro_recall: original=0.956212, retrained=0.956212, delta=0.000000
+- normal_recall: original=0.933072, retrained=0.912424, delta=-0.020648
+- macro_recall: original=0.966536, retrained=0.956212, delta=-0.010324
 - attack_fnr: original=0.000000, retrained=0.000000, delta=0.000000
 
 ## Assessment
-- Overall retraining assessment: little_difference
-- Retrained bundle: C:\Users\abdul\Desktop\BigDataFinalPaper\models\edge_iiot_xgb_model_retrained.joblib
+- Overall retraining assessment: hurt
+- Retrained bundle: models\edge_iiot_xgb_model_retrained.joblib

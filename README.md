@@ -1,38 +1,50 @@
-# BigDataFinalPaper
+# Explainable Edge-IIoT Intrusion Detection
 
-Offline Edge-IIoT IDS rebuild for the paper-oriented workflow.
+This repository contains the implementation for an explainable Edge-IIoT intrusion detection system. The system trains an XGBoost binary IDS, evaluates training-only SMOTE cross-validation, calibrates decision thresholds, trains an attack-subtype classifier, generates SHAP explanations, adds benign-anomaly and drift monitoring layers, and exposes the evidence through a MongoDB-backed Streamlit dashboard.
 
-This repository is set up so someone else can clone it, install the Python environment, place the dataset and demo files in the expected folders, and run the existing scripts as-is.
+The final paper PDF and Word document are submitted separately. This GitHub repository is intentionally kept code-focused and lightweight: large datasets, PCAPs, model binaries, dashboard screenshots, live-capture logs, and LaTeX build outputs are not committed.
+
+## Highlights
+
+- Binary XGBoost detector for Edge-IIoT normal/attack detection.
+- Training-only SMOTE cross-validation to reduce missed attacks without validation leakage.
+- Attack-subtype XGBoost model trained from Edge-IIoT `Attack_type` labels.
+- Threshold calibration using PR-AUC, ROC-AUC, precision, recall, FNR, and confusion counts.
+- SHAP global importance and top-3 local alert explanations.
+- Isolation Forest benign-anomaly override for suspicious benign predictions.
+- ADWIN live drift monitoring with validation-gated retraining as a backup mechanism.
+- MongoDB and Streamlit dashboard for offline artifacts, live windows, PCAP replay, SHAP, drift, retraining, and latency evidence.
 
 ## Repository Layout
 
-- `data/` - main dataset location. The primary file used by the scripts is `data/ML-EdgeIIoT-dataset.csv`.
-- `demo/` - demo PCAP files used for replay, comparison, and injected live windows.
-- `docs/` - step-by-step notes for each stage of the rebuild.
-- `models/` - saved model bundles and metadata files.
-- `notebooks/` - optional workspace for exploratory notebooks. This folder is a scratch area for analysis; no notebook is required to run the pipeline.
-- `output/` - generated reports, figures, live capture output, and dashboard artifacts.
-- `src/` - all runnable scripts.
-- `BigDataFinalProject/` - archived reference project kept for comparison only.
+- `src/` - runnable implementation scripts.
+- `tests/` - unit tests for runtime contracts, live hardening, Mongo schema, ADWIN, multiclass thresholds, and robustness helpers.
+- `docs/` - implementation notes and verification notes.
+- `schemas/` - MongoDB prediction/evidence schema.
+- `models/*.json` - lightweight model metadata and feature contract files.
+- `output/reports/*.json` and `output/reports/*.md` - lightweight result summaries used by the paper and dashboard.
+- `output/demo/*.json` and `output/demo/*.md` - lightweight demo replay summaries.
+- `requirements.txt` and `environment.yml` - reproducible Python environment files.
+
+Large local files are expected but ignored by Git:
+
+- `data/ML-EdgeIIoT-dataset.csv`
+- `demo/*.pcap`, `demo/*.pcapng`, or `demo/*.cap`
+- `models/*.joblib`
+- `output/figures/`
+- `output/live/`
+- generated CSV prediction dumps and LaTeX/PDF/Word build outputs
 
 ## Setup
 
-### 1. Install Python
-
-Use Python 3.11 if possible. The original reference environment was based on 3.11.
-
-### 2. Create an environment
-
-You can use either Conda or `venv`.
-
-#### Option A: Conda from the root environment file
+Use the Conda environment when possible:
 
 ```powershell
 conda env create -f environment.yml
 conda activate bigdatafinalpaper
 ```
 
-#### Option B: Python `venv` from the root requirements file
+Or use pip:
 
 ```powershell
 python -m venv .venv
@@ -41,188 +53,75 @@ python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
 ```
 
-#### Option C: Archived reference environment
+Optional external tools:
 
-The archived project still includes the original starter environment file at `BigDataFinalProject\environment-edgeids.yml`.
+- Wireshark/TShark for PCAP replay and live capture.
+- MongoDB for dashboard persistence and live evidence.
 
-```powershell
-conda env create -f BigDataFinalProject\environment-edgeids.yml
-conda activate edgeids
+## Required Local Inputs
+
+Place the Edge-IIoT CSV here:
+
+```text
+data/ML-EdgeIIoT-dataset.csv
 ```
 
-Then install the extra packages used by the current rebuild:
+Place optional demo PCAPs here:
 
-```powershell
-python -m pip install shap matplotlib imbalanced-learn streamlit plotly streamlit-autorefresh pymongo
+```text
+demo/
 ```
 
-### 3. Install external tools for live/demo work
+The scripts recreate model binaries and generated outputs locally. The GitHub repository stores only metadata and compact report summaries.
 
-These are only needed for the optional live and replay workflows:
+## Reproduction Workflow
 
-- Install Wireshark so `tshark` is available.
-- Install MongoDB locally, or point the dashboard to MongoDB Atlas with `MONGODB_URI`.
-
-If `tshark` is not on your `PATH`, the live and demo replay scripts let you pass the full executable path.
-
-### 4. Confirm the required files are present
-
-Before running the scripts, make sure these files/folders exist:
-
-- `data\ML-EdgeIIoT-dataset.csv`
-- `demo\` with any demo `.pcap`, `.pcapng`, or `.cap` files you want to replay
-- `models\` and `output\` will be created or updated by the scripts as needed
-
-## Recommended Workflow
-
-If you are reproducing the project from scratch, run the scripts in this order:
-
-1. Offline baseline classifier
-2. SMOTE + cross-validation
-3. SHAP explainability
-4. Threshold calibration
-5. Anomaly detector
-6. Drift detection
-7. Adaptive retraining
-8. Demo PCAP replay
-9. MongoDB seeding and dashboard
-10. Live capture / live dashboard
-
-The sections below show the exact commands.
-
-## Offline Classifier
-
-### Baseline training
+Run from the repository root.
 
 ```powershell
 python src\edge_iiot_experiment.py train
-```
-
-This is the main binary Edge-IIoT holdout baseline. It uses the archived preprocessing contract, the archived XGBoost settings, a fixed threshold, and holdout evaluation.
-
-### SMOTE + 5-fold CV
-
-```powershell
 python src\edge_iiot_experiment.py train --use_smote --cv_folds 5
-```
-
-This keeps the baseline path and adds training-only SMOTE inside each fold, then evaluates a stratified 5-fold cross-validation run.
-
-## Explainability and Calibration
-
-### SHAP explainability
-
-```powershell
+python src\edge_iiot_experiment.py train_multiclass
 python src\edge_iiot_shap.py
-```
-
-Generates global SHAP importance, top features, local examples, and a summary figure from the saved model bundle.
-
-### Threshold calibration
-
-```powershell
 python src\edge_iiot_thresholds.py
-```
-
-Builds threshold grids and recommendation files for the holdout and CV outputs. The live dashboard can also surface live threshold rows when they exist in MongoDB.
-
-## Robustness Layers
-
-### Anomaly detection
-
-```powershell
 python src\edge_iiot_anomaly.py train
-```
-
-Trains the Isolation Forest anomaly layer on benign training rows only and evaluates it on the held-out split.
-
-### Drift detection
-
-```powershell
-python src\edge_iiot_drift.py dataset
 python src\edge_iiot_drift.py demo
-```
-
-Compares two batches in the transformed feature space using PSI-style drift scoring.
-
-### Adaptive retraining
-
-```powershell
 python src\edge_iiot_retrain.py train
+python src\edge_iiot_robustness.py
 ```
 
-Uses the drift results to decide whether retraining should be triggered, then compares the original model and retrained model on the same evaluation target.
-
-## Demo Replay
-
-### Offline PCAP replay
-
-```powershell
-python src\edge_iiot_demo_replay.py
-```
-
-Replays `.pcap`, `.pcapng`, or `.cap` files from `demo/`, extracts tshark fields, scores them with the saved bundle, and compares the per-file summary against the archived reference output.
-
-## MongoDB and Dashboard
-
-### Seed MongoDB from saved artifacts
+Seed MongoDB and start the dashboard:
 
 ```powershell
 python src\edge_iiot_mongo.py seed
-```
-
-This loads the offline outputs into MongoDB so the dashboard can read them. Use `MONGODB_URI` and `MONGODB_DB` if you want to point at a different database.
-
-### Start the dashboard
-
-```powershell
 streamlit run src\edge_iiot_dashboard.py
 ```
 
-The dashboard reads MongoDB first and falls back to the saved CSV/JSON artifacts when MongoDB is not available.
-
-### Live capture
-
-The dashboard can start and stop the live capture worker, which uses `tshark` and writes live rows into MongoDB.
-
-Live capture is controlled from the dashboard, but the worker can also be run directly:
+Run live capture directly, or use the dashboard controls:
 
 ```powershell
-python src\edge_iiot_live_capture.py live --interface <iface> --tshark <path-or-tshark> --window_seconds 30
+python src\edge_iiot_live_capture.py live --interface 5 --window_seconds 30
 ```
 
-Live capture writes into `output\live\` and stores live packet rows, predictions, SHAP rows, drift summaries, and live window summaries in MongoDB.
+## Validation
 
-## What the Scripts Expect
+```powershell
+python -m pytest -q
+python -m compileall -q src tests
+```
 
-- The classifier scripts expect `data\ML-EdgeIIoT-dataset.csv`.
-- The replay and live scripts expect `demo\` files or a live network interface.
-- The dashboard expects MongoDB if you want the live views, but it still works with the saved offline artifacts.
-- The notebooks folder is available for exploratory work, but the main pipeline does not depend on any notebook.
+The tests focus on feature-contract validation, leakage-safe SMOTE behavior, live-path hardening, top-3 SHAP alert payloads, MongoDB traceability schema, ADWIN events, multiclass thresholds, and robustness report generation.
 
-## Generated Outputs
+## Result Summary
 
-The main outputs are written under `models\`, `output\reports\`, `output\figures\`, `output\demo\`, and `output\live\`.
+The committed summaries document the following verified results:
 
-Common examples:
+- Holdout binary detector: 99.26% ROC-AUC, 99.85% PR-AUC, 94.73% attack recall at threshold 0.5.
+- SMOTE five-fold cross-validation: 99.98% mean attack recall and 0.025% mean attack FNR.
+- Attack-subtype model: 14 Edge-IIoT attack classes, 88.52% macro recall, 89.82% weighted F1.
+- SHAP explainability: global importance plus exactly top-3 local contributors for alert records.
+- Live/demo verification: MongoDB prediction traceability, alert latency fields, anomaly overrides, ADWIN drift events, retraining request/result records, and dashboard views.
 
-- `models\edge_iiot_xgb_model.joblib`
-- `models\edge_iiot_xgb_model.metadata.json`
-- `models\edge_iiot_xgb_model.feature_importance.csv`
-- `output\reports\edge_iiot_holdout_metrics.json`
-- `output\reports\edge_iiot_cv_summary.json`
-- `output\reports\edge_iiot_shap_summary.json`
-- `output\reports\edge_iiot_holdout_threshold_recommendations.json`
-- `output\reports\edge_iiot_anomaly_holdout_metrics.json`
-- `output\reports\edge_iiot_drift_summary.json`
-- `output\reports\edge_iiot_retrain_comparison.json`
-- `output\demo\edge_iiot_demo_predictions.csv`
-- `output\demo\edge_iiot_demo_anomaly_summary.csv`
-- `output\demo\edge_iiot_demo_drift_summary.json`
-- `output\live\live_capture_status.json`
+## Notes
 
-## Notes for Contributors
-
-- Keep new analysis notebooks in `notebooks\` if you want to do ad hoc exploration.
-- Do not overwrite the archived `BigDataFinalProject\` folder; it is only there for reference.
-- If you add new dependencies, update this README with the install command so the setup stays reproducible.
+The original binary model is treated as the primary detector. Adaptive retraining is implemented as a guarded backup path: drift can trigger a candidate model, but the active pointer should change only if validation metrics justify replacement.
