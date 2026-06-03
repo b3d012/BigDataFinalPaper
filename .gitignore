@@ -8,7 +8,12 @@
 !src/
 !src/**/*.py
 !docs/
+!docs/**/*.html
+!docs/**/*.css
+!docs/**/*.js
 !docs/**/*.md
+!docs/assets/
+!docs/assets/**
 !tests/
 !tests/**/*.py
 !schemas/

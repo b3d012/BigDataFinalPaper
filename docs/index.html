@@ -1,0 +1,646 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta
+    name="description"
+    content="Explainable, drift-aware intrusion detection for Edge-IIoT networks using XGBoost, SHAP, ADWIN, MongoDB, and Streamlit."
+  />
+  <title>Explainable Edge-IIoT Intrusion Detection | Abdullah Al Wazzan</title>
+  <link rel="stylesheet" href="./styles.css" />
+</head>
+<body>
+  <div class="page-shell">
+    <div class="bg-glow bg-glow-one"></div>
+    <div class="bg-glow bg-glow-two"></div>
+    <div class="bg-grid"></div>
+
+    <header class="topbar">
+      <a class="brand" href="#home" aria-label="Back to top">
+        <span class="brand-mark">B</span>
+        <span class="brand-copy">
+          <strong>Abdullah Al Wazzan</strong>
+          <small>AI &amp; Data Science</small>
+        </span>
+      </a>
+
+      <nav class="nav" aria-label="Primary">
+        <a href="#problem">Problem</a>
+        <a href="#overview">Overview</a>
+        <a href="#results">Results</a>
+        <a href="#evidence">Evidence</a>
+        <a href="#methodology">Method</a>
+        <a href="#architecture">Architecture</a>
+        <a href="#reproducibility">Reproducibility</a>
+      </nav>
+    </header>
+
+    <main>
+      <section class="section hero" id="home" data-section>
+        <div class="hero-copy reveal">
+          <div class="eyebrow-row">
+            <span class="pill">Big Data Cybersecurity</span>
+            <span class="pill pill-soft">GitHub Pages Case Study</span>
+          </div>
+          <p class="kicker">Explainable Edge-IIoT Intrusion Detection</p>
+          <h1>Explainable, drift-aware intrusion detection for Edge-IIoT networks using XGBoost.</h1>
+          <p class="lede">
+            A reproducible Big Data IDS pipeline that combines XGBoost detection, attack-subtype
+            classification, SHAP explanations, threshold calibration, anomaly overrides, ADWIN drift
+            monitoring, guarded retraining, MongoDB evidence storage, and a Streamlit dashboard.
+          </p>
+
+          <div class="hero-actions">
+            <a class="btn btn-primary" href="https://github.com/b3d012/Edge-IIoT-Explainable-IDS" target="_blank" rel="noreferrer">
+              View GitHub Repo
+            </a>
+            <a class="btn btn-secondary" href="https://b3d012.github.io/" target="_blank" rel="noreferrer">
+              Back to Portfolio
+            </a>
+          </div>
+
+          <div class="hero-stats">
+            <article class="stat-card reveal">
+              <span class="stat-label">Dataset</span>
+              <strong>156,986</strong>
+              <small>deduplicated Edge-IIoT records</small>
+            </article>
+            <article class="stat-card reveal">
+              <span class="stat-label">Features</span>
+              <strong>32</strong>
+              <small>retained network features</small>
+            </article>
+            <article class="stat-card reveal">
+              <span class="stat-label">Classes</span>
+              <strong>14</strong>
+              <small>attack classes in the verified snapshot</small>
+            </article>
+            <article class="stat-card reveal">
+              <span class="stat-label">Delivery</span>
+              <strong>MongoDB + Streamlit</strong>
+              <small>live dashboard and evidence layer</small>
+            </article>
+          </div>
+        </div>
+
+        <aside class="hero-panel reveal" aria-label="Project snapshot">
+          <div class="panel-card panel-card-mini">
+            <h3>Core stack</h3>
+            <ul class="tag-row tag-row-compact">
+              <li>XGBoost</li>
+              <li>SHAP</li>
+              <li>SMOTE</li>
+              <li>ADWIN</li>
+              <li>MongoDB</li>
+              <li>Streamlit</li>
+              <li>TShark</li>
+            </ul>
+          </div>
+          <div class="panel-card panel-card-primary">
+            <span class="panel-pill">Verified snapshot</span>
+            <h2>Portfolio-ready IDS case study</h2>
+            <p class="panel-copy">
+              Measurable, explainable, and honest about prototype limits under local replay and
+              demonstration conditions.
+            </p>
+          </div>
+        </aside>
+      </section>
+
+      <section class="section" id="problem" data-section>
+        <div class="section-head reveal">
+          <span class="section-label">01</span>
+          <h2>Problem</h2>
+          <p>
+            Edge and Industrial IoT systems expose sensors, gateways, and cyber-physical devices to
+            scanning, denial-of-service traffic, spoofing, abnormal packet timing, and protocol misuse.
+            A useful IDS must not only detect attacks, but also explain alerts, handle imbalance,
+            monitor drift, and store evidence for analyst review.
+          </p>
+        </div>
+
+        <div class="two-col">
+          <article class="glass-card reveal">
+            <h3>Operational reality</h3>
+            <p>
+              Security teams need more than a binary yes-or-no score. They need a detection layer that
+              can be defended in a review, traced back to feature evidence, and monitored when the
+              traffic distribution changes.
+            </p>
+          </article>
+          <article class="glass-card reveal">
+            <h3>Design goal</h3>
+            <p>
+              This prototype emphasizes reproducible evaluation, analyst-facing explanations, and
+              careful decision thresholds so the system stays practical instead of merely accurate.
+            </p>
+          </article>
+        </div>
+      </section>
+
+      <section class="section" id="overview" data-section>
+        <div class="section-head reveal">
+          <span class="section-label">02</span>
+          <h2>Project Overview</h2>
+          <p>
+            The pipeline starts with Edge-IIoT traffic, then branches into binary detection, attack
+            subtype attribution, explainability, drift monitoring, and dashboarded evidence storage.
+          </p>
+        </div>
+
+        <div class="overview-grid">
+          <article class="overview-card reveal">
+            <h3>Dataset</h3>
+            <p>Edge-IIoT traffic with a cleaned feature contract and deduplicated training view.</p>
+          </article>
+          <article class="overview-card reveal">
+            <h3>Main detector</h3>
+            <p>Binary XGBoost normal vs attack classifier.</p>
+          </article>
+          <article class="overview-card reveal">
+            <h3>Second stage</h3>
+            <p>XGBoost attack-subtype classifier for attack-only rows.</p>
+          </article>
+          <article class="overview-card reveal">
+            <h3>Imbalance handling</h3>
+            <p>Training-only SMOTE cross-validation to reduce leakage.</p>
+          </article>
+          <article class="overview-card reveal">
+            <h3>Explainability</h3>
+            <p>SHAP global importance and top-3 local alert explanations.</p>
+          </article>
+          <article class="overview-card reveal">
+            <h3>Monitoring</h3>
+            <p>Isolation Forest anomaly override and ADWIN drift detection.</p>
+          </article>
+          <article class="overview-card reveal">
+            <h3>Adaptation</h3>
+            <p>Validation-gated retraining as a guarded backup path.</p>
+          </article>
+          <article class="overview-card reveal">
+            <h3>Dashboard</h3>
+            <p>MongoDB-backed Streamlit interface for artifacts, live windows, PCAP replay, SHAP, drift, retraining, robustness, and latency evidence.</p>
+          </article>
+        </div>
+      </section>
+
+      <section class="section" id="results" data-section>
+        <div class="section-head reveal">
+          <span class="section-label">03</span>
+          <h2>Key Results</h2>
+          <p>
+            The values below are presented from the verified snapshot, the held-out split, or the
+            local replay/live demonstration conditions used in the project.
+          </p>
+        </div>
+
+        <div class="results-grid">
+          <article class="result-card reveal">
+            <span class="result-title">Binary detector</span>
+            <ul>
+              <li><strong>ROC-AUC:</strong> 99.26%</li>
+              <li><strong>PR-AUC:</strong> 99.85%</li>
+              <li><strong>Attack recall at threshold 0.5:</strong> 94.73%</li>
+              <li><strong>Attack FNR at threshold 0.5:</strong> 5.27%</li>
+            </ul>
+          </article>
+
+          <article class="result-card reveal">
+            <span class="result-title">SMOTE cross-validation</span>
+            <ul>
+              <li><strong>Mean attack recall:</strong> 99.98%</li>
+              <li><strong>Mean attack FNR:</strong> 0.025%</li>
+            </ul>
+          </article>
+
+          <article class="result-card reveal">
+            <span class="result-title">Threshold calibration</span>
+            <ul>
+              <li><strong>Holdout threshold:</strong> 0.5 to 0.13</li>
+              <li><strong>Attack recall:</strong> 99.96%</li>
+              <li><strong>Attack FNR:</strong> 0.041%</li>
+              <li><strong>Attack precision:</strong> 97.23%</li>
+            </ul>
+          </article>
+
+          <article class="result-card reveal">
+            <span class="result-title">Attack-subtype model</span>
+            <ul>
+              <li><strong>Attack classes:</strong> 14 Edge-IIoT attack classes</li>
+              <li><strong>Macro recall:</strong> 88.52%</li>
+              <li><strong>Macro F1:</strong> 87.11%</li>
+              <li><strong>Weighted F1:</strong> 89.82%</li>
+            </ul>
+          </article>
+        </div>
+      </section>
+
+      <section class="section" id="evidence" data-section>
+        <div class="section-head reveal">
+          <span class="section-label">04</span>
+          <h2>Dashboard and Demo Evidence</h2>
+          <p>
+            Screenshots from the local `Screenshots/` folder are used below as visual proof of the
+            model artifacts, live dashboard, PCAP demo library, SHAP explanations, thresholds, drift,
+            retraining, and injected traffic views.
+          </p>
+        </div>
+
+        <div class="evidence-grid">
+          <figure class="shot-card reveal" data-modal-src="./assets/screenshots/dashboardSetup.png" data-modal-alt="Live capture setup dashboard screenshot">
+            <button class="shot-button" type="button">
+              <img src="./assets/screenshots/dashboardSetup.png" alt="Live capture setup dashboard screenshot" />
+            </button>
+            <figcaption>
+              <h3>Live Capture Setup</h3>
+              <p>Shows the configured capture controls and live dashboard entry point used for the demo.</p>
+            </figcaption>
+          </figure>
+
+          <figure class="shot-card reveal" data-modal-src="./assets/screenshots/dashboardLIVE.png" data-modal-alt="Live IDS dashboard screenshot">
+            <button class="shot-button" type="button">
+              <img src="./assets/screenshots/dashboardLIVE.png" alt="Live IDS dashboard screenshot" />
+            </button>
+            <figcaption>
+              <h3>Live IDS Dashboard</h3>
+              <p>Documents the MongoDB-backed live view used to monitor captured windows and alerts.</p>
+            </figcaption>
+          </figure>
+
+          <figure class="shot-card reveal" data-modal-src="./assets/screenshots/dashboard7.png" data-modal-alt="Threshold calibration and live evidence dashboard screenshot">
+            <button class="shot-button" type="button">
+              <img src="./assets/screenshots/dashboard7.png" alt="Threshold calibration and live evidence dashboard screenshot" />
+            </button>
+            <figcaption>
+              <h3>Threshold Calibration</h3>
+              <p>Shows the live decision threshold context alongside prediction trend and explanation rows.</p>
+            </figcaption>
+          </figure>
+
+          <figure class="shot-card reveal" data-modal-src="./assets/screenshots/LiveSHAP.png" data-modal-alt="Live predictions and SHAP dashboard screenshot">
+            <button class="shot-button" type="button">
+              <img src="./assets/screenshots/LiveSHAP.png" alt="Live predictions and SHAP dashboard screenshot" />
+            </button>
+            <figcaption>
+              <h3>Live Predictions and SHAP</h3>
+              <p>Shows live prediction rows and exactly the top local feature contributors when available.</p>
+            </figcaption>
+          </figure>
+
+          <figure class="shot-card reveal" data-modal-src="./assets/screenshots/GlobalSHAP.png" data-modal-alt="Global SHAP dashboard screenshot">
+            <button class="shot-button" type="button">
+              <img src="./assets/screenshots/GlobalSHAP.png" alt="Global SHAP dashboard screenshot" />
+            </button>
+            <figcaption>
+              <h3>Global SHAP</h3>
+              <p>Shows the global importance ranking used to explain the model’s dominant signals.</p>
+            </figcaption>
+          </figure>
+
+          <figure class="shot-card reveal" data-modal-src="./assets/screenshots/Drift&Retaining.png" data-modal-alt="Anomaly, drift, and retraining dashboard screenshot">
+            <button class="shot-button" type="button">
+              <img src="./assets/screenshots/Drift&Retaining.png" alt="Anomaly, drift, and retraining dashboard screenshot" />
+            </button>
+            <figcaption>
+              <h3>Anomaly, Drift, and Retraining</h3>
+              <p>Shows the guarded adaptation panels and the evidence trail used in drift review.</p>
+            </figcaption>
+          </figure>
+
+          <figure class="shot-card reveal" data-modal-src="./assets/screenshots/DemoPcapResults.png" data-modal-alt="PCAP library and injection evidence screenshot">
+            <button class="shot-button" type="button">
+              <img src="./assets/screenshots/DemoPcapResults.png" alt="PCAP library and injection evidence screenshot" />
+            </button>
+            <figcaption>
+              <h3>PCAP Library and Injection Evidence</h3>
+              <p>Shows the controlled demo PCAP set and the verified live injection windows.</p>
+            </figcaption>
+          </figure>
+
+          <figure class="shot-card reveal" data-modal-src="./assets/screenshots/KaliDemoPcapsSource.jpeg" data-modal-alt="Kali PCAP generation and attack script evidence screenshot">
+            <button class="shot-button" type="button">
+              <img src="./assets/screenshots/KaliDemoPcapsSource.jpeg" alt="Kali PCAP generation and attack script evidence screenshot" />
+            </button>
+            <figcaption>
+              <h3>Kali PCAP Generation</h3>
+              <p>Shows the controlled attack-script source used to produce demo traffic for replay.</p>
+            </figcaption>
+          </figure>
+        </div>
+      </section>
+
+      <section class="section" id="methodology" data-section>
+        <div class="section-head reveal">
+          <span class="section-label">05</span>
+          <h2>Methodology</h2>
+          <p>
+            The workflow is kept intentionally transparent so the paper, dashboard, and scripts all tell
+            the same story.
+          </p>
+        </div>
+
+        <div class="timeline">
+          <article class="timeline-item reveal"><span>1</span><p>Load Edge-IIoT traffic data.</p></article>
+          <article class="timeline-item reveal"><span>2</span><p>Remove identity and payload-heavy fields.</p></article>
+          <article class="timeline-item reveal"><span>3</span><p>Retain numeric protocol features.</p></article>
+          <article class="timeline-item reveal"><span>4</span><p>Train the binary XGBoost IDS.</p></article>
+          <article class="timeline-item reveal"><span>5</span><p>Apply SMOTE only inside training folds.</p></article>
+          <article class="timeline-item reveal"><span>6</span><p>Calibrate thresholds to reduce missed attacks.</p></article>
+          <article class="timeline-item reveal"><span>7</span><p>Train the attack-subtype classifier on attack rows.</p></article>
+          <article class="timeline-item reveal"><span>8</span><p>Generate SHAP global and local explanations.</p></article>
+          <article class="timeline-item reveal"><span>9</span><p>Seed MongoDB with artifacts and evidence.</p></article>
+          <article class="timeline-item reveal"><span>10</span><p>Run live capture or controlled PCAP replay.</p></article>
+          <article class="timeline-item reveal"><span>11</span><p>Monitor anomaly, drift, retraining, robustness, and latency in Streamlit.</p></article>
+        </div>
+      </section>
+
+      <section class="section" id="architecture" data-section>
+        <div class="section-head reveal">
+          <span class="section-label">06</span>
+          <h2>Live System Architecture</h2>
+          <p>
+            The runtime path is deliberately small and auditable so the evidence can be traced from the
+            packet source to the dashboard.
+          </p>
+        </div>
+
+        <div class="architecture">
+          <div class="arch-node reveal">
+            <strong>TShark</strong>
+            <p>Extracts packet and window features.</p>
+          </div>
+          <div class="arch-arrow">→</div>
+          <div class="arch-node reveal">
+            <strong>Python feature contract</strong>
+            <p>Applies the saved contract and validates feature order.</p>
+          </div>
+          <div class="arch-arrow">→</div>
+          <div class="arch-node reveal">
+            <strong>XGBoost binary IDS</strong>
+            <p>Scores normal vs attack.</p>
+          </div>
+          <div class="arch-arrow">→</div>
+          <div class="arch-node reveal">
+            <strong>Subtype classifier</strong>
+            <p>Predicts the attack family when needed.</p>
+          </div>
+          <div class="arch-arrow">→</div>
+          <div class="arch-node reveal">
+            <strong>SHAP + MongoDB</strong>
+            <p>Records top-3 alert explanations and stores evidence.</p>
+          </div>
+          <div class="arch-arrow">→</div>
+          <div class="arch-node reveal">
+            <strong>Streamlit dashboard</strong>
+            <p>Displays analyst-facing windows, predictions, drift, retraining, and latency evidence.</p>
+          </div>
+        </div>
+      </section>
+
+      <section class="section" id="pcap" data-section>
+        <div class="section-head reveal">
+          <span class="section-label">07</span>
+          <h2>PCAP Demonstration Library</h2>
+          <p>
+            These are controlled demonstration files for replay and live injection, not proof of
+            production deployment.
+          </p>
+        </div>
+
+        <div class="two-col">
+          <article class="glass-card reveal">
+            <h3>Library</h3>
+            <ul class="bullet-list">
+              <li><code>BENIGN_BASELINE.pcap</code></li>
+              <li><code>NMAP_SYN_SCAN.pcap</code></li>
+              <li><code>NMAP_SERVICE_SCAN.pcap</code></li>
+              <li><code>NMAP_AGGRESSIVE_SCAN.pcap</code></li>
+              <li><code>NMAP_FULL_PORT_SCAN.pcap</code></li>
+              <li><code>SSH_BRUTEFORCE_PATTERN.pcap</code></li>
+              <li><code>HTTP_FLOOD_PATTERN.pcap</code></li>
+              <li><code>UDP_FLOOD_PATTERN.pcap</code></li>
+            </ul>
+          </article>
+          <article class="glass-card reveal">
+            <h3>Interpretation</h3>
+            <p>
+              The demo files support controlled replay and live injection experiments so the dashboard
+              can show how the detector behaves across benign baseline and attack-style traffic.
+            </p>
+          </article>
+        </div>
+      </section>
+
+      <section class="section" id="explainability" data-section>
+        <div class="section-head reveal">
+          <span class="section-label">08</span>
+          <h2>Explainability</h2>
+          <p>
+            SHAP is used both globally and locally. Global SHAP highlights the most important network
+            features, while live alerts store exactly the top-3 local contributors when available.
+          </p>
+        </div>
+
+        <div class="two-col">
+          <article class="glass-card reveal">
+            <h3>Typical informative features</h3>
+            <p>
+              TCP acknowledgement, TCP sequence, TCP flags, TCP length, UDP stream, MQTT header flags,
+              and ICMP checksum appear prominently in the explanation views.
+            </p>
+          </article>
+          <article class="glass-card reveal">
+            <h3>Why it matters</h3>
+            <p>
+              The alert payloads are easier to audit when a prediction is paired with the features that
+              most influenced it, especially in a security review or demo setting.
+            </p>
+          </article>
+        </div>
+      </section>
+
+      <section class="section" id="drift" data-section>
+        <div class="section-head reveal">
+          <span class="section-label">09</span>
+          <h2>Drift, Retraining, and Robustness</h2>
+          <p>
+            The adaptive layer is intentionally cautious. It is built to detect change, not to replace
+            the active model blindly.
+          </p>
+        </div>
+
+        <div class="two-col">
+          <article class="glass-card reveal">
+            <h3>Drift logic</h3>
+            <p>
+              ADWIN monitors live probability changes, and PSI-based drift analysis compares reference
+              and target distributions.
+            </p>
+          </article>
+          <article class="glass-card reveal">
+            <h3>Retraining policy</h3>
+            <p>
+              Retraining is guarded by validation gates so the active model only changes when the
+              evidence supports it.
+            </p>
+          </article>
+          <article class="glass-card reveal">
+            <h3>Robustness checks</h3>
+            <p>
+              The robustness report includes surrogate FGSM and PGD-style checks and should be read as
+              prototype evidence, not final production hardening.
+            </p>
+          </article>
+          <article class="glass-card reveal">
+            <h3>Honest framing</h3>
+            <p>
+              The project is presented as a carefully verified prototype with local replay and demo
+              conditions rather than a finalized enterprise IDS deployment.
+            </p>
+          </article>
+        </div>
+      </section>
+
+      <section class="section" id="structure" data-section>
+        <div class="section-head reveal">
+          <span class="section-label">10</span>
+          <h2>Repository Structure</h2>
+          <p>
+            The repository stays code-focused, with large local files intentionally ignored so the GitHub
+            Pages site and source tree remain lightweight.
+          </p>
+        </div>
+
+        <div class="two-col">
+          <article class="glass-card reveal">
+            <h3>Core tree</h3>
+            <pre class="code-block"><code>src/
+tests/
+docs/
+schemas/
+models/
+output/reports/
+output/demo/
+Screenshots/
+requirements.txt
+environment.yml</code></pre>
+          </article>
+          <article class="glass-card reveal">
+            <h3>Ignored local assets</h3>
+            <ul class="bullet-list">
+              <li><code>data/ML-EdgeIIoT-dataset.csv</code></li>
+              <li><code>demo/*.pcap</code></li>
+              <li><code>models/*.joblib</code></li>
+              <li><code>output/figures/</code></li>
+              <li><code>output/live/</code></li>
+              <li>generated CSV dumps and paper build outputs</li>
+            </ul>
+          </article>
+        </div>
+      </section>
+
+      <section class="section" id="reproducibility" data-section>
+        <div class="section-head reveal">
+          <span class="section-label">11</span>
+          <h2>Reproducibility</h2>
+          <p>
+            The commands below mirror the workflow described in the paper and README. They are kept
+            visible here for quick review from a CV or portfolio.
+          </p>
+        </div>
+
+        <div class="two-col">
+          <article class="glass-card reveal">
+            <h3>Setup</h3>
+            <pre class="code-block"><code>conda env create -f environment.yml
+conda activate bigdatafinalpaper</code></pre>
+          </article>
+          <article class="glass-card reveal">
+            <h3>Workflow</h3>
+            <pre class="code-block"><code>python src\edge_iiot_experiment.py train
+python src\edge_iiot_experiment.py train --use_smote --cv_folds 5
+python src\edge_iiot_experiment.py train_multiclass
+python src\edge_iiot_shap.py
+python src\edge_iiot_thresholds.py
+python src\edge_iiot_anomaly.py train
+python src\edge_iiot_drift.py demo
+python src\edge_iiot_retrain.py train
+python src\edge_iiot_robustness.py
+python src\edge_iiot_mongo.py seed
+streamlit run src\edge_iiot_dashboard.py</code></pre>
+          </article>
+          <article class="glass-card reveal">
+            <h3>Live capture</h3>
+            <pre class="code-block"><code>python src\edge_iiot_live_capture.py live --interface 5 --window_seconds 30</code></pre>
+          </article>
+        </div>
+      </section>
+
+      <section class="section" id="skills" data-section>
+        <div class="section-head reveal">
+          <span class="section-label">12</span>
+          <h2>Skills Demonstrated</h2>
+          <p>A concise view of the technical range demonstrated by the project.</p>
+        </div>
+
+        <div class="tag-cloud reveal">
+          <span>Big Data Analytics</span>
+          <span>Intrusion Detection</span>
+          <span>Edge-IIoT</span>
+          <span>XGBoost</span>
+          <span>SMOTE</span>
+          <span>SHAP</span>
+          <span>Streamlit</span>
+          <span>MongoDB</span>
+          <span>TShark</span>
+          <span>PCAP Replay</span>
+          <span>ADWIN</span>
+          <span>Isolation Forest</span>
+          <span>Threshold Calibration</span>
+          <span>Model Evaluation</span>
+          <span>Drift Monitoring</span>
+          <span>Explainable AI</span>
+          <span>Reproducible ML Pipelines</span>
+          <span>Python</span>
+        </div>
+      </section>
+
+      <section class="section summary-section" id="summary" data-section>
+        <div class="glass-card summary-card reveal">
+          <span class="section-label">13</span>
+          <h2>Summary</h2>
+          <p>
+            This project demonstrates applied machine learning for cybersecurity, explainable AI,
+            drift-aware monitoring, reproducible experiment design, live dashboard development, and
+            honest evaluation of IDS performance under local replay and prototype conditions.
+          </p>
+        </div>
+      </section>
+    </main>
+
+    <footer class="footer">
+      <div>
+        <strong>Abdullah Al Wazzan</strong>
+        <span>AI &amp; Data Science</span>
+        <span>Big Data / Edge-IIoT IDS</span>
+      </div>
+      <div class="footer-links">
+        <a href="https://github.com/b3d012/Edge-IIoT-Explainable-IDS" target="_blank" rel="noreferrer">GitHub Repo</a>
+        <a href="https://b3d012.github.io/" target="_blank" rel="noreferrer">Portfolio</a>
+      </div>
+    </footer>
+  </div>
+
+  <div class="modal" id="image-modal" aria-hidden="true" role="dialog" aria-label="Image preview">
+    <button class="modal-backdrop" type="button" data-close-modal aria-label="Close image preview"></button>
+    <div class="modal-panel" role="document">
+      <button class="modal-close" type="button" data-close-modal aria-label="Close image preview">Close</button>
+      <img id="modal-image" alt="" />
+      <p id="modal-caption"></p>
+    </div>
+  </div>
+
+  <script src="./script.js"></script>
+</body>
+</html>
