@@ -19,4 +19,4 @@
 
 ## Assessment
 - Overall retraining assessment: hurt
-- Retrained bundle: models\edge_iiot_xgb_model_retrained.joblib
+- Retrained bundle: D:\Projects\BigDataFinalPaper\models\edge_iiot_xgb_model_retrained.joblib

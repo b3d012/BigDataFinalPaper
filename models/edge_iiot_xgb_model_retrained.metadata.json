@@ -848,7 +848,7 @@
     "drift_rows": 31397,
     "evaluation_rows": 31397,
     "source": "dataset",
-    "model_version": "20260504T160817Z"
+    "model_version": "20260603T002256Z"
   },
   "evaluation_metrics": {
     "roc_auc": 0.9932354791358784,
@@ -891,6 +891,6 @@
     }
   },
   "runtime": {
-    "train_seconds": 150.55654580000555
+    "train_seconds": 172.75896629993804
   }
 }

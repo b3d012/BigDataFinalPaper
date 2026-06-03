@@ -1,12 +1,13 @@
 {
   "kind": "active_model_pointer",
-  "version": "20260504T152600Z",
-  "updated_at": "2026-05-04T15:26:00+00:00",
+  "version": "20260603T001643Z",
+  "updated_at": "2026-06-03T00:16:43.997401+00:00",
   "binary_model_path": "models\\edge_iiot_xgb_model.joblib",
-  "attack_model_path": "models\\edge_iiot_attack_xgb_model.joblib",
-  "feature_contract_path": "models\\edge_iiot_feature_contract.json",
+  "attack_model_path": null,
+  "feature_contract_path": "D:\\Projects\\BigDataFinalPaper\\models\\edge_iiot_feature_contract.json",
   "threshold_path": "models\\edge_iiot_xgb_model.metadata.json",
-  "multiclass_threshold_path": "output\\reports\\edge_iiot_multiclass_thresholds.json",
-  "updated_by": "submission_alignment",
-  "retraining_assessment": "backup_available"
+  "multiclass_threshold_path": null,
+  "binary_threshold": 0.5,
+  "binary_threshold_strategy": "fixed",
+  "label_source": "Attack_label"
 }

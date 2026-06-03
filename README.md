@@ -53,6 +53,32 @@ python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
 ```
 
+## Quick Start
+
+If you just cloned the repo and want the fastest path to something running:
+
+1. Create and activate the Python environment.
+2. Install the dependencies.
+3. Run the test suite to confirm the checkout is healthy:
+
+```powershell
+python -m pytest -q
+```
+
+4. Launch the dashboard from the repository root:
+
+```powershell
+streamlit run src\edge_iiot_dashboard.py
+```
+
+The dashboard works with the committed reports and metadata even if MongoDB is not running. It falls back to the local `output/` and `models/` artifacts automatically.
+
+If you want to retrain or rerun the offline experiments, you also need the Edge-IIoT CSV at:
+
+```text
+data/ML-EdgeIIoT-dataset.csv
+```
+
 Optional external tools:
 
 - Wireshark/TShark for PCAP replay and live capture.
@@ -102,6 +128,17 @@ Run live capture directly, or use the dashboard controls:
 ```powershell
 python src\edge_iiot_live_capture.py live --interface 5 --window_seconds 30
 ```
+
+## Common First Runs
+
+Use these commands depending on what you want to do:
+
+- `python -m pytest -q` to confirm the repo is installed correctly.
+- `streamlit run src\edge_iiot_dashboard.py` to view the dashboard with local artifacts.
+- `python src\edge_iiot_mongo.py seed` if you have MongoDB running and want to seed it from the saved outputs.
+- `python src\edge_iiot_experiment.py train` if you have placed `data/ML-EdgeIIoT-dataset.csv`.
+- `python src\edge_iiot_experiment.py train_multiclass` for the attack-only multiclass model.
+- `python src\edge_iiot_robustness.py` for the surrogate robustness report.
 
 ## Validation
 
